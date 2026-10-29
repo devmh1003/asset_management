@@ -2,6 +2,7 @@ import { createBackend, isFirebaseConfigured, COLLECTIONS } from './store.js';
 import * as M from './model.js';
 import { exportWorkbook, parseWorkbook } from './excel.js';
 import { fetchRates, isStale } from './fx.js';
+import { AI_MODELS, DEFAULT_AI, loadAiConfig, saveAiConfig, aiReady, maskKey, loadChat, saveChat, chatStream, chatJson, testConnection, SYSTEM_PROMPT, QUICK_PROMPTS } from './ai.js';
 
 const S = {
   be: null,
@@ -39,10 +40,11 @@ const PAGES = [
   ['history', '연도별 추이', '↗'],
   ['portfolio', '포트폴리오', '◔'],
   ['simulate', '시뮬레이션', '∿'],
+  ['advisor', 'AI 어드바이저', '✦'],
   ['settings', '설정', '⚙'],
   ['admin', '관리자', '★'],
 ];
-const PAGE_TITLE = { dashboard: '대시보드', assets: '자산 (Balance Sheet)', liabilities: '부채 (Debt & Liability)', cashflow: '현금흐름 (Cash Flow)', kpi: '핵심 KPI', history: '연도별 추이', portfolio: '포트폴리오', simulate: '시뮬레이션', settings: '설정', admin: '관리자' };
+const PAGE_TITLE = { dashboard: '대시보드', assets: '자산 (Balance Sheet)', liabilities: '부채 (Debt & Liability)', cashflow: '현금흐름 (Cash Flow)', kpi: '핵심 KPI', history: '연도별 추이', portfolio: '포트폴리오', simulate: '시뮬레이션', advisor: 'AI 어드바이저', settings: '설정', admin: '관리자' };
 
 const PALETTE = ['#3b6ff0', '#17a883', '#f39c3d', '#8e5cf0', '#e5484d', '#38bdf8', '#c6b42c', '#9a7b6a', '#ec6fb2', '#64748b'];
 const RATINGS = ['매우좋음', '긍정', '보통', '나쁨', '매우나쁨'];
@@ -425,6 +427,7 @@ function pageDashboard() {
         heroStat('부채비율', M.fmtPct(sum.debtRatio), `유동비율 ${M.fmtPct(sum.liquidity)}`),
         heroStat('기대수익률', M.fmtPct(sum.expRate), `기대이익 ${M.fmtEok(sum.profit)}원`))),
     insightsRow(sum, year, q, bs),
+    healthRow(sum, year, q, bs),
     h('div', { class: 'grid-2 wide-left' },
       card(cardHead('자산 변동 이력', '기준일별 대분류 구성 (원화 환산)'), bs.length > 1 ? chart('c-trend', trendChartConfig(bs), '300px') : h('p', { class: 'muted' }, '기준일이 2개 이상이면 추이가 표시됩니다. 자산 페이지에서 “새 기준일로 복사” 하세요.')),
       card(cardHead('자산 구성', S.basis), majors.length ? h('div', { class: 'donut-wrap' }, chart('c-major', {
@@ -476,12 +479,45 @@ function insightsRow(sum, year, q, bs) {
     const hasQ = bs.some((b) => b.startsWith(String(curY)) && M.quarterOf(b) === curQ);
     if (!hasQ) items.push(h('div', { class: 'kpi' }, h('div', { class: 'kpi-label' }, `${curY}년 ${curQ}분기 스냅샷`), h('div', { class: 'kpi-value', style: { fontSize: '15px' } }, '아직 기준일이 없습니다'), h('div', { class: 'kpi-sub' }, btn('현재 자산으로 분기 기준일 만들기', () => { go('assets'); newBasis(); }, 'small link'))));
   }
-  // 90일 내 만기 부채
-  const soon = S.data.liabilities.filter((l) => l.maturity && (new Date(l.maturity) - now) / 86400e3 <= 90 && new Date(l.maturity) >= now);
-  if (soon.length) items.push(kpi('90일 내 만기 부채', `${soon.length}건 · ${M.fmtEok(soon.reduce((s, l) => s + M.num(l.amount), 0))}원`, soon.map((l) => `${l.creditor} ${l.maturity}`).join(', ')));
-  // 위험자산 경고
-  if (sum.riskRatio > 0.6) items.push(kpi('위험자산 비중 높음', M.fmtPct(sum.riskRatio), 'Risk 그룹이 총자산의 60% 를 넘습니다'));
+  // 이번 달 예산 (현금흐름 지출 행의 월 예산)
+  const bud = M.budgetStatus(S.data.cashflow.filter((r) => M.num(r.year) === curY), now.getMonth());
+  if (bud.length) {
+    const tb = bud.reduce((s, b) => s + b.budget, 0), ta = bud.reduce((s, b) => s + b.actual, 0);
+    const over = bud.filter((b) => b.ratio > 1);
+    items.push(h('div', { class: 'kpi' }, h('div', { class: 'kpi-label' }, `${now.getMonth() + 1}월 예산 사용`), h('div', { class: 'kpi-value' }, `${M.fmtNum(ta)} / ${M.fmtNum(tb)}만원`),
+      h('div', { class: 'bar' }, h('i', { class: ta > tb ? 'bad' : ta > tb * 0.85 ? 'warn' : 'ok', style: { width: `${Math.min(100, tb ? (ta / tb) * 100 : 0)}%` } })),
+      h('div', { class: 'kpi-sub' }, over.length ? `초과: ${over.map((b) => b.name).join(', ')}` : `${bud.length}개 항목 예산 내`)));
+  }
   return items.length ? h('div', { class: 'kpis' }, items) : null;
+}
+
+// 벤치마크 기능 공통 컨텍스트 (건강 점수·알림·AI 요약에 사용)
+function analysisCtx(sum = summary(), year = Number(String(S.basis).slice(0, 4)), q = M.quarterOf(S.basis), bs = M.bases(S.data.assets)) {
+  const cfYear = cfYears().includes(year) ? year : S.cfYear;
+  return {
+    sum, q, bases: bs, cfYear,
+    cashflowRows: S.data.cashflow.filter((r) => M.num(r.year) === cfYear),
+    kpis: S.data.kpis.filter((k) => M.num(k.year) === year).sort((a, b) => M.num(a.order) - M.num(b.order)),
+    kpiCtx: kpiCtx(), history: S.data.history, liabilities: S.data.liabilities, assets: basisAssets(), settings: S.settings,
+  };
+}
+
+// 재무 건강 점수 + 알림 센터 (뱅크샐러드 금융건강점수 · Mint/Betterment 알림 벤치마크)
+function healthRow(sum, year, q, bs) {
+  const ctx = analysisCtx(sum, year, q, bs);
+  const hs = M.healthScore(ctx);
+  const alerts = M.buildAlerts(ctx);
+  const tone = (s) => (s == null ? '' : s >= 70 ? 'ok' : s >= 40 ? 'warn' : 'bad');
+  return h('div', { class: 'grid-2' },
+    card(cardHead('재무 건강 점수', '비상자금 · 부채 · 저축률 · 분산 · 연령 대비 위험 · KPI', btn('AI 진단 받기 →', () => { go('advisor'); aiSend(QUICK_PROMPTS[0][1]); }, 'small')),
+      h('div', { class: 'health' },
+        h('div', { class: `score-ring ${tone(hs.score)}`, style: { '--p': hs.score ?? 0 } }, h('b', {}, hs.score ?? '—'), h('small', {}, hs.grade)),
+        h('div', { class: 'health-parts' }, hs.parts.map((p) => h('div', { class: 'hpart', title: p.hint },
+          h('div', { class: 'hpart-head' }, h('span', {}, p.label), h('span', { class: 'muted' }, p.value), h('b', { class: tone(p.score) }, p.score == null ? '—' : Math.round(p.score))),
+          h('div', { class: 'bar' }, h('i', { class: tone(p.score), style: { width: `${p.score ?? 0}%` } }))))))),
+    card(cardHead('알림 센터', alerts.length ? `${alerts.length}건 — 클릭하면 해당 페이지로 이동합니다` : '주의할 항목이 없습니다 👍'),
+      alerts.length ? h('ul', { class: 'alerts' }, alerts.slice(0, 8).map((a) => h('li', { class: a.level, onclick: () => go(a.page) },
+        h('span', { class: 'alert-dot' }), h('div', {}, h('b', {}, a.title), h('p', { class: 'muted small' }, a.text))))) : h('p', { class: 'muted' }, '부채 만기, 비상자금, 집중도, 위험 비중, 수수료, KPI, 예산을 자동으로 점검합니다.')));
 }
 
 const heroStat = (label, value, sub) => h('div', { class: 'hero-stat' }, h('div', { class: 'kpi-label' }, label), h('div', { class: 'hero-stat-value' }, value), sub ? h('div', { class: 'kpi-sub' }, sub) : null);
@@ -604,10 +640,12 @@ function pageAssets() {
     { key: 'rate', label: '기대이익률', type: 'pct', w: '84px' },
     { key: 'profit', label: '기대이익', type: 'calc', calc: (r) => M.toKRW(r, fx) * M.num(r.rate) },
     { key: 'nrv', label: 'NRV', type: 'calc', calc: (r) => M.toKRW(r, fx) * (1 + M.num(r.rate)) },
+    { key: 'fee', label: '연보수율', type: 'pct', w: '78px', nullable: true, placeholder: '0.5' },
     { key: 'manager', label: '운용위임사', type: 'text', w: '110px', list: 'dl-managers' },
     { key: 'note', label: '기타사항', type: 'text', w: '130px' },
   ];
-  const foot = [{ cls: 'total', cells: ['합계', '', '', '', '', M.fmtKRW(sum.total), '100%', M.fmtPct(sum.expRate), M.fmtKRW(sum.profit), M.fmtKRW(sum.nrv), '', ''] }];
+  const fee = M.feeDrag(all, fx);
+  const foot = [{ cls: 'total', cells: ['합계', '', '', '', '', M.fmtKRW(sum.total), '100%', M.fmtPct(sum.expRate), M.fmtKRW(sum.profit), M.fmtKRW(sum.nrv), fee.annual ? `연 ${M.fmtEok(fee.annual)}` : '', '', ''] }];
   const dupNames = Object.entries(all.reduce((m, r) => { const k = (r.name || '').trim(); if (k) m[k] = (m[k] || 0) + 1; return m; }, {})).filter(([, n]) => n > 1).map(([k]) => k);
   return h('div', { class: 'stack' },
     h('datalist', { id: 'dl-names' }, nameList.map((n) => h('option', { value: n }))),
@@ -617,6 +655,7 @@ function pageAssets() {
       btn('새 기준일로 복사', newBasis),
       btn('기준일 변경', renameBasis),
       btn('✨ 자동 정리', tidyAssets, '', { title: '공백 정리 · 미분류 항목 키워드 자동 분류 · 통화 보정' }),
+      aiReady(aiState().cfg) ? btn('🤖 AI 분류', aiClassify, '', { title: '미분류 항목을 OpenAI 로 분류' }) : null,
       btn('기준일 삭제', deleteBasis, 'ghost-danger'),
       h('span', { class: 'spacer' }), searchBox()),
     dupNames.length ? h('div', { class: 'banner' }, `중복 이름: ${dupNames.join(', ')} — 같은 항목이면 합치는 것을 권장합니다`) : null,
@@ -624,7 +663,7 @@ function pageAssets() {
       kpi('총자산', `${M.fmtKRW(sum.total)}원`, M.fmtEok(sum.total), 'accent'),
       kpi('기대이익 / NRV', `${M.fmtEok(sum.profit)}원`, `NRV ${M.fmtEok(sum.nrv)}원 · 가중 ${M.fmtPct(sum.expRate)}`),
       kpi('Var / Risk / Fixed', `${M.fmtPct(sum.liquidity, 0)} / ${M.fmtPct(sum.riskRatio, 0)} / ${M.fmtPct(sum.total ? (sum.byGroup.Fixed || 0) / sum.total : 0, 0)}`, '그룹별 비중'),
-      kpi('항목 수', `${rows.length}개`, `${Object.keys(sum.byMajor).length}개 대분류`)),
+      fee.annual ? kpi('연간 보수·수수료', `${M.fmtEok(fee.annual)}원`, `평균 ${M.fmtPct(fee.avgFee, 2)} · 10년 복리 영향 ${M.fmtEok(fee.drag10)}원`) : kpi('항목 수', `${rows.length}개`, `${Object.keys(sum.byMajor).length}개 대분류 · 연보수율을 입력하면 수수료 분석`)),
     h('div', { class: 'chips' }, Object.entries(sum.byMajor).sort((a, b) => b[1] - a[1]).map(([k, v]) => h('span', { class: 'chip' }, h('i', { class: 'dot', style: { background: colorOf(k) } }), h('b', {}, k), ` ${M.fmtEok(v)} · ${M.fmtPct(sum.total ? v / sum.total : 0)}`))),
     card(null, grid({ cols, rows, coll: 'assets', foot, rowColor: (r) => colorOf(r.major) }),
       S.filter ? h('p', { class: 'muted small' }, `검색 결과 ${rows.length} / ${all.length} 항목 (합계는 전체 기준)`) : null),
@@ -639,6 +678,33 @@ function ensureMid(major, mid) {
   if (!t) { t = { major, group: 'Risk', mids: [] }; tax.push(t); changed = true; }
   if (!t.mids.includes(mid)) { t.mids.push(mid); changed = true; }
   if (changed) saveSettings();
+}
+
+// OpenAI 로 미분류(기본값) 항목 분류 — 분류체계에 있는 값만 적용
+async function aiClassify() {
+  const ai = aiState();
+  if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); return go('settings'); }
+  const tax = S.settings.taxonomy;
+  const rows = basisAssets().filter((r) => r.name && (!r.major || !r.mid || (r.major === tax[0]?.major && r.mid === tax[0]?.mids[0])));
+  if (!rows.length) return toast('분류할 항목이 없습니다 — 이미 모두 분류되어 있습니다');
+  toast(`${rows.length}개 항목을 AI 로 분류하는 중…`);
+  const taxonomyText = tax.map((t) => `${t.major}: ${t.mids.join(', ')}`).join('\n');
+  try {
+    const j = await chatJson({ cfg: ai.cfg, messages: [
+      { role: 'system', content: `한국 개인 자산 항목을 아래 분류체계로 분류하라. 반드시 JSON {"items":[{"id":"...","major":"...","mid":"...","currency":"KRW"}]} 형식만 출력하고 major/mid 는 분류체계에 있는 값만 사용한다. 통화는 이름에서 명확할 때만 KRW 외 값을 쓴다.\n분류체계:\n${taxonomyText}` },
+      { role: 'user', content: JSON.stringify(rows.map((r) => ({ id: r.id, name: r.name, manager: r.manager || '', note: r.note || '' }))) },
+    ] });
+    const changed = [];
+    for (const it of j.items || []) {
+      const r = rows.find((x) => x.id === it.id), t = tax.find((x) => x.major === it.major);
+      if (!r || !t || !t.mids.includes(it.mid)) continue;
+      if (r.major !== it.major || r.mid !== it.mid) { r.major = it.major; r.mid = it.mid; changed.push(r); }
+      if (it.currency && it.currency !== r.currency && S.settings.fx[it.currency] && !M.num(r.value)) { r.currency = it.currency; if (!changed.includes(r)) changed.push(r); }
+    }
+    if (!changed.length) return toast('AI 가 변경할 분류를 찾지 못했습니다');
+    render();
+    await guard(() => S.be.putMany('assets', changed), `${changed.length}개 항목을 AI 가 분류했습니다 (수정 가능)`);
+  } catch (e) { console.error(e); toast(`AI 분류 실패: ${e.message}`, 'err'); }
 }
 
 async function tidyAssets() {
@@ -721,10 +787,15 @@ function pageCashflow() {
     { key: 'type', label: '구분', type: 'select', options: () => ['수입', '지출'], w: '72px', after: (r) => { if (!M.CF_GROUPS[r.type]?.includes(r.group)) r.group = M.CF_GROUPS[r.type]?.[0] || ''; } },
     { key: 'group', label: '그룹', type: 'select', options: (r) => M.CF_GROUPS[r.type] || [], w: '90px' },
     { key: 'name', label: '항목', type: 'text', w: '110px' },
+    { key: 'budget', label: '월예산', type: 'num', w: '66px', placeholder: '지출' },
     ...Array.from({ length: 12 }, (_, i) => ({ key: `m${i}`, label: `${i + 1}월`, type: 'num', w: '64px', get: (r) => M.num(r.m?.[i]), set: (r, v) => { (r.m ||= Array(12).fill(0))[i] = v; } })),
     { key: 'sum', label: '합계', type: 'calc', fmt: 'num', calc: (r) => tot((r.m || []).map(M.num)) },
+    { key: 'vsBudget', label: '예산대비', type: 'calc', fmt: 'pct', calc: (r) => { const b = M.num(r.budget); if (!b) return ''; const ms = (r.m || []).map(M.num).filter((v, i) => cf.inc[i] || cf.out[i]); return ms.length ? ms.reduce((a, c) => a + c, 0) / ms.length / b : ''; }, cls: (r) => { const b = M.num(r.budget); if (!b) return ''; const ms = (r.m || []).map(M.num).filter((v, i) => cf.inc[i] || cf.out[i]); return ms.length && ms.reduce((a, c) => a + c, 0) / ms.length > b ? 'over' : ''; } },
   ];
-  const line = (label, arr, cls) => ({ cls, cells: [label, '', '', ...arr.map((v) => M.fmtNum(v)), M.fmtNum(tot(arr))] });
+  const line = (label, arr, cls) => ({ cls, cells: [label, '', '', '', ...arr.map((v) => M.fmtNum(v)), M.fmtNum(tot(arr)), ''] });
+  const monthIdx = S.cfYear === thisYear() ? new Date().getMonth() : 11;
+  const bud = M.budgetStatus(rows, monthIdx);
+  const budTotal = bud.reduce((s, b) => s + b.budget, 0), budActual = bud.reduce((s, b) => s + b.actual, 0);
   return h('div', { class: 'stack' },
     toolbar(
       h('label', { class: 'inline' }, '연도', yearSelect(years, S.cfYear, (y) => { S.cfYear = y; render(); })),
@@ -737,11 +808,11 @@ function pageCashflow() {
       kpi('연간 수입', `${M.fmtNum(tot(cf.inc))}만원`),
       kpi('연간 지출', `${M.fmtNum(tot(cf.out))}만원`),
       kpi('연간 순이익', `${M.fmtNum(tot(cf.net))}만원`, `저축률 ${tot(cf.inc) ? M.fmtPct(tot(cf.net) / tot(cf.inc)) : '—'}`, 'accent'),
-      kpi('월평균 지출', `${M.fmtNum(tot(cf.out) / 12, 1)}만원`)),
+      bud.length ? kpi(`${monthIdx + 1}월 예산 대비`, `${M.fmtNum(budActual)} / ${M.fmtNum(budTotal)}만원`, bud.filter((b) => b.ratio > 1).length ? `초과 ${bud.filter((b) => b.ratio > 1).map((b) => b.name).join(', ')}` : '모든 항목 예산 내') : kpi('월평균 지출', `${M.fmtNum(tot(cf.out) / 12, 1)}만원`, '지출 행에 월예산을 넣으면 예산 대비 분석')),
     card(`${S.cfYear} Cash Flow`, grid({
       cols, rows, coll: 'cashflow', label: (r) => r.name,
       rowClass: (r) => (r.type === '수입' ? 'inc' : 'out'),
-      foot: [line('수입 합계 (A)', cf.inc), line('지출 합계 (B)', cf.out), line('Net Income (A-B)', cf.net, 'total'), { cls: 'muted-row', cells: ['누적 순이익', '', '', ...cf.cum.map((v) => M.fmtNum(v)), M.fmtNum(cf.cum[11])] }],
+      foot: [line('수입 합계 (A)', cf.inc), line('지출 합계 (B)', cf.out), line('Net Income (A-B)', cf.net, 'total'), { cls: 'muted-row', cells: ['누적 순이익', '', '', '', ...cf.cum.map((v) => M.fmtNum(v)), M.fmtNum(cf.cum[11]), ''] }],
     })),
     card('월별 현금흐름', chart('c-cf2', cashflowChartConfig())));
 }
@@ -1062,10 +1133,74 @@ function pageSimulate() {
   // 기준일이 바뀌었거나 데이터 입력 전(순자산 0)에 만들어진 기본값이면 다시 계산
   if (!S.sim || S.simBasis !== S.basis || (S.sim.net === 0 && S.basis)) { S.sim = simDefaults(); S.simBasis = S.basis; }
   if (!S.simTab) S.simTab = 'project';
-  const tabs = [['project', '순자산 전망'], ['rebalance', '리밸런싱'], ['debt', '부채 상환']];
+  const tabs = [['project', '순자산 전망'], ['rebalance', '리밸런싱'], ['debt', '부채 상환'], ['fire', '은퇴 · FIRE']];
   const tabBar = h('div', { class: 'tabs' }, tabs.map(([id, label]) => h('button', { class: `tab ${S.simTab === id ? 'active' : ''}`, onclick: () => { S.simTab = id; render(); } }, label)));
-  const body = S.simTab === 'project' ? simProject() : S.simTab === 'rebalance' ? simRebalance() : simDebt();
+  const body = S.simTab === 'project' ? simProject() : S.simTab === 'rebalance' ? simRebalance() : S.simTab === 'debt' ? simDebt() : simFire();
   return h('div', { class: 'stack' }, tabBar, body);
+}
+
+// 은퇴 · FIRE 계산기 (Wealthfront Path / Empower Retirement Planner 벤치마크)
+function fireDefaults() {
+  const d = simDefaults();
+  const cfRows = S.data.cashflow.filter((r) => M.num(r.year) === (S.cfYear ?? thisYear()));
+  return { net: d.net, monthlySave: d.monthlySave, annualRate: d.annualRate || 0.06, annualExpense: Math.round(M.monthlyExpense(cfRows) * 12) || 36000000, swr: 0.04, inflation: 0.025, saveGrowth: 0.03, age: M.currentAge(S.data.history) || 30, retireAge: 55 };
+}
+// 목표 나이까지 도달하려면 필요한 월 저축액 (이분 탐색)
+function requiredSave(f, years) {
+  if (years <= 0) return null;
+  const ok = (s) => M.fireSim({ ...f, monthlySave: s, years }).reach != null;
+  if (ok(f.monthlySave)) return f.monthlySave;
+  let lo = 0, hi = 5e7;
+  if (!ok(hi)) return null;
+  for (let i = 0; i < 40; i++) { const mid = (lo + hi) / 2; ok(mid) ? (hi = mid) : (lo = mid); }
+  return Math.ceil(hi / 1e4) * 1e4;
+}
+function simFire() {
+  if (!S.fire || S.fireBasis !== S.basis || (S.fire.net === 0 && S.basis)) { S.fire = fireDefaults(); S.fireBasis = S.basis; }
+  const f = S.fire;
+  const rerender = () => render();
+  const r = M.fireSim({ ...f, years: 45 });
+  const toRetire = Math.max(0, f.retireAge - f.age);
+  const need = requiredSave(f, toRetire);
+  const variants = [['Lean FIRE', 0.7], ['FIRE', 1], ['Fat FIRE', 1.5]];
+  const swrs = [0.03, 0.035, 0.04, 0.05];
+  const span = Math.min(45, Math.max(10, (r.reach ?? 30) + 5));
+  const series = r.series.slice(0, span + 1);
+  const chartCfg = {
+    type: 'line',
+    data: {
+      labels: series.map((p) => (p.year === 0 ? '현재' : `${thisYear() + p.year} (${f.age + p.year}세)`)),
+      datasets: [
+        { label: '예상 순자산', data: series.map((p) => Math.round(p.nominal)), borderColor: PALETTE[0], backgroundColor: 'rgba(59,111,240,0.12)', fill: true, tension: 0.3, pointRadius: 0, borderWidth: 2.5 },
+        { label: 'FIRE 목표 (물가 반영)', data: series.map((p) => Math.round(r.fireNumber * Math.pow(1 + f.inflation, p.year))), borderColor: PALETTE[2], backgroundColor: PALETTE[2], borderDash: [6, 4], pointRadius: 0, borderWidth: 1.5 },
+      ],
+    },
+    options: { maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false }, scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 10 } }, y: { ticks: { callback: (v) => M.fmtEok(v) }, grid: { color: cssVar('--line') } } }, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, usePointStyle: true } }, tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${M.fmtKRW(c.raw)}원` } } } },
+  };
+  return h('div', { class: 'stack' },
+    h('div', { class: 'grid-2 wide-right' },
+      card(cardHead('가정', '연 생활비 ÷ 인출률 = 은퇴에 필요한 자산', btn('현재 데이터로 초기화', () => { S.fire = fireDefaults(); render(); }, 'small')),
+        h('div', { class: 'sim-fields' },
+          slider('은퇴 후 연 생활비', 'annualExpense', f, { min: 1e7, max: 2e8, step: 1e6, onchange: rerender }),
+          slider('안전 인출률 (SWR)', 'swr', f, { min: 2, max: 6, step: 0.25, pct: true, onchange: rerender }),
+          slider('시작 순자산', 'net', f, { min: 0, max: 2e9, step: 1e6, onchange: rerender }),
+          slider('월 저축액', 'monthlySave', f, { min: 0, max: 1e7, step: 1e5, onchange: rerender }),
+          slider('연 수익률', 'annualRate', f, { min: 0, max: 15, step: 0.5, pct: true, onchange: rerender }),
+          slider('물가상승률', 'inflation', f, { min: 0, max: 6, step: 0.1, pct: true, onchange: rerender }),
+          slider('현재 나이', 'age', f, { min: 18, max: 70, step: 1, fmt: (v) => `${v}세`, onchange: rerender }),
+          slider('목표 은퇴 나이', 'retireAge', f, { min: 30, max: 80, step: 1, fmt: (v) => `${v}세`, onchange: rerender }))),
+      h('div', { class: 'stack' },
+        h('div', { class: 'kpis' },
+          kpi('FIRE 목표 자산', `${M.fmtEok(r.fireNumber)}원`, `연 ${M.fmtEok(f.annualExpense)}원 ÷ ${M.fmtPct(f.swr, 2)} · 현재 ${M.fmtPct(r.coverage, 0)} 달성`, 'accent'),
+          kpi('경제적 자유 도달', r.reach == null ? '45년 내 미달' : r.reach === 0 ? '지금 가능' : `${r.reach}년 후 · ${f.age + r.reach}세`, r.reach != null ? `${thisYear() + r.reach}년 예상` : '저축액이나 수익률을 조정해 보세요'),
+          kpi(`${f.retireAge}세 은퇴에 필요한 월 저축`, need == null ? (toRetire ? '월 5천만원으로도 불가' : '—') : `${M.fmtEok(need)}원`, need != null && need > f.monthlySave ? `현재보다 ${M.fmtEok(need - f.monthlySave)}원 더` : need != null ? '현재 저축으로 충분' : `남은 기간 ${toRetire}년`),
+          kpi('코스트 FIRE', r.coastYears == null ? '해당 없음' : r.coastYears === 0 ? '달성' : `${r.coastYears}년 후`, '추가 저축 없이 현재 자산의 성장만으로 목표에 도달하는 시점')),
+        card(cardHead('순자산 vs FIRE 목표', `목표선은 물가상승률 ${M.fmtPct(f.inflation)} 을 반영해 매년 오릅니다`), chart('c-fire', chartCfg, '300px')),
+        card(cardHead('생활비 수준 × 인출률 매트릭스', '칸: 필요 자산 / 도달 시점'), h('div', { class: 'table-wrap' }, h('table', { class: 'grid compact' },
+          h('thead', {}, h('tr', {}, h('th', {}, '시나리오'), swrs.map((s) => h('th', { class: 'r' }, `SWR ${M.fmtPct(s, 1)}`)))),
+          h('tbody', {}, variants.map(([label, k]) => h('tr', { class: k === 1 ? 'inc' : '' }, h('td', {}, h('b', {}, label), h('span', { class: 'muted small' }, ` 연 ${M.fmtEok(f.annualExpense * k)}`)),
+            swrs.map((s) => { const v = M.fireSim({ ...f, annualExpense: f.annualExpense * k, swr: s, years: 45 }); return h('td', { class: 'r' }, h('div', {}, M.fmtEok(v.fireNumber)), h('small', { class: v.reach == null ? 'down' : 'muted' }, v.reach == null ? '미달' : v.reach === 0 ? '달성' : `${v.reach}년 · ${f.age + v.reach}세`)); }))))))),
+        h('p', { class: 'muted small' }, '4% 규칙(Trinity Study)은 미국 주식·채권 기준의 경험칙입니다. 한국 거주자는 국민연금·퇴직연금 수령액을 생활비에서 차감해 계산하면 더 현실적입니다.'))));
 }
 
 function simProject() {
@@ -1152,7 +1287,10 @@ function simRebalance() {
   const groupOf = Object.fromEntries(S.settings.taxonomy.map((t) => [t.major, t.group]));
   const rateOf = (m) => { const as = basisAssets().filter((a) => a.major === m); const k = as.reduce((s, a) => s + M.toKRW(a, S.settings.fx), 0); return k ? as.reduce((s, a) => s + M.toKRW(a, S.settings.fx) * M.num(a.rate), 0) / k : 0; };
   const after = rows.reduce((acc, r) => { acc.profit += r.target * rateOf(r.major); if (groupOf[r.major] === 'Risk') acc.risk += r.target; if (groupOf[r.major] === 'Var') acc.var += r.target; return acc; }, { profit: 0, risk: 0, var: 0 });
+  const age = M.currentAge(S.data.history);
+  const gt = M.glideTarget(age) * 100;
   const presets = {
+    [`연령 기준 (${age ? `만 ${age}세` : '나이 미상'} · 위험 ${Math.round(gt)}%)`]: { 투자: Math.round(gt * 0.7), 가상자산: Math.round(gt * 0.2), 대체투자: Math.round(gt * 0.1), 현금: Math.round((100 - gt) * 0.5), 채권형자산: Math.round((100 - gt) * 0.25), '연금/보험': 100 - Math.round(gt * 0.7) - Math.round(gt * 0.2) - Math.round(gt * 0.1) - Math.round((100 - gt) * 0.5) - Math.round((100 - gt) * 0.25) },
     '보수적 (현금 50 · 투자 30 · 가상 5 · 고정 15)': { 현금: 50, 투자: 30, 가상자산: 5, 채권형자산: 10, '연금/보험': 5 },
     '균형 (현금 30 · 투자 45 · 가상 10 · 고정 15)': { 현금: 30, 투자: 45, 가상자산: 10, 채권형자산: 10, '연금/보험': 5 },
     '공격적 (현금 15 · 투자 55 · 가상 20 · 고정 10)': { 현금: 15, 투자: 55, 가상자산: 20, 채권형자산: 5, '연금/보험': 5 },
@@ -1272,7 +1410,8 @@ function pageSettings() {
           await saveSettings(); render();
         }), btn('추천 분류 다시 병합', async () => { const m = M.mergeTaxonomy(S.settings.taxonomy, S.taxTemplate || M.DEFAULT_TAXONOMY); S.settings.taxonomy = m.taxonomy; await saveSettings(); render(); toast(m.changed ? '추천 분류를 추가했습니다' : '이미 모두 포함되어 있습니다'); }),
         h('span', { class: 'muted small' }, S.taxTemplate ? '관리자가 편집한 추천 템플릿 사용 중' : '기본 추천 템플릿 사용 중')))),
-    card(cardHead('엑셀', '시트: 자산(B.S) · 부채(D.L) · 현금흐름(C.F) · 연도별추이 · 포트폴리오 · KPI · 관리목표 · 환율 · 분류체계'),
+    aiSettingsCard(),
+    card(cardHead('엑셀', '시트: 자산(B.S) · 부채(D.L) · 현금흐름(C.F) · 연도별추이 · 포트폴리오 · KPI · 시나리오 · AI리포트 · 관리목표 · 환율 · 분류체계'),
       h('div', { class: 'row' }, btn('엑셀 다운로드', downloadExcel, 'primary'), btn('엑셀 업로드', pickUpload), btn('빈 양식 다운로드', downloadTemplate))),
     card(cardHead('데이터', S.be.kind === 'firebase' ? `Firebase Firestore 에 저장 중 · ${S.user?.email || ''}` : '로컬 모드: 이 브라우저(localStorage)에만 저장됩니다.'),
       h('div', { class: 'row' },
@@ -1283,6 +1422,155 @@ function pageSettings() {
       btn('라이트 / 다크 전환', toggleTheme),
       btn('시스템 설정 따르기', () => { applyTheme(null); render(); }),
       btn('현재 화면 인쇄 / PDF', () => window.print()))));
+}
+
+// ---------- AI 어드바이저 (OpenAI) ----------
+function aiState() {
+  if (!S.ai) S.ai = { cfg: loadAiConfig(), messages: loadChat(), busy: false, abort: null, showCtx: false, draft: '', liveEl: null };
+  return S.ai;
+}
+
+function aiSettingsCard() {
+  const ai = aiState();
+  const d = { ...ai.cfg };
+  const key = h('input', { type: 'password', value: d.key, placeholder: 'sk-…', autocomplete: 'off', 'data-fid': 'ai:key', oninput: (e) => { d.key = e.target.value.trim(); } });
+  const model = h('input', { type: 'text', value: d.model, list: 'dl-ai-models', autocomplete: 'off', 'data-fid': 'ai:model', oninput: (e) => { d.model = e.target.value.trim(); } });
+  const endpoint = h('input', { type: 'text', value: d.endpoint, placeholder: DEFAULT_AI.endpoint, 'data-fid': 'ai:endpoint', oninput: (e) => { d.endpoint = e.target.value.trim() || DEFAULT_AI.endpoint; } });
+  const status = h('span', { class: `chip-s ${aiReady(ai.cfg) ? 'ok' : ''}` }, aiReady(ai.cfg) ? `연결됨 · ${ai.cfg.model} · ${ai.cfg.key ? maskKey(ai.cfg.key) : '프록시'}` : '미설정');
+  const save = async (test) => {
+    if (!d.key && d.endpoint === DEFAULT_AI.endpoint) return toast('API 키를 입력하세요', 'err');
+    saveAiConfig(d); ai.cfg = loadAiConfig();
+    if (test) {
+      status.textContent = '테스트 중…';
+      try { const m = await testConnection(ai.cfg); toast(`연결 성공 (${m})`); } catch (e) { toast(`연결 실패: ${e.message}`, 'err'); }
+    } else toast('AI 설정을 저장했습니다 (이 브라우저에만 저장)');
+    render();
+  };
+  return card(cardHead('AI 어드바이저 (OpenAI API)', '키는 이 브라우저(localStorage)에만 저장되며 Firestore 나 다른 서버로 보내지 않습니다', status),
+    h('datalist', { id: 'dl-ai-models' }, AI_MODELS.map((m) => h('option', { value: m }))),
+    h('div', { class: 'form ai-form' },
+      h('label', {}, h('span', {}, 'OpenAI API 키'), key),
+      h('label', {}, h('span', {}, '모델'), model),
+      h('label', {}, h('span', {}, '엔드포인트 (프록시를 쓸 때만 변경)'), endpoint)),
+    h('div', { class: 'row', style: { marginTop: '10px' } },
+      btn('저장', () => save(false), 'primary'), btn('저장 후 연결 테스트', () => save(true)),
+      ai.cfg.key ? btn('키 삭제', () => { saveAiConfig({ ...DEFAULT_AI }); ai.cfg = loadAiConfig(); render(); toast('키를 삭제했습니다'); }, 'ghost-danger') : null,
+      h('a', { href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener', class: 'btn link' }, 'API 키 발급 ↗')),
+    h('p', { class: 'muted small', style: { marginTop: '10px' } }, '질문할 때 자산·부채·현금흐름·KPI 의 요약(이름·금액·분류)이 OpenAI 로 전송됩니다. 비용은 OpenAI 계정에서 모델별 토큰 단가로 청구되며, gpt-4o-mini 기준 질문 1회 ≈ 1~3원 수준입니다. 공용 PC 에서는 사용 후 키를 삭제하세요.'));
+}
+
+// 마크다운 축약 렌더 (제목·목록·굵게·코드) — innerHTML 미사용
+function mdInline(s) {
+  const out = [];
+  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  let last = 0, m;
+  while ((m = re.exec(s))) {
+    if (m.index > last) out.push(s.slice(last, m.index));
+    out.push(m[0].startsWith('**') ? h('b', {}, m[0].slice(2, -2)) : h('code', {}, m[0].slice(1, -1)));
+    last = m.index + m[0].length;
+  }
+  if (last < s.length) out.push(s.slice(last));
+  return out;
+}
+function md(text) {
+  const nodes = [];
+  let list = null, para = [];
+  const flushP = () => { if (para.length) { nodes.push(h('p', {}, mdInline(para.join(' ')))); para = []; } };
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trimEnd();
+    const hm = line.match(/^(#{1,6})\s+(.*)/);
+    const lm = line.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)/);
+    if (hm) { flushP(); list = null; nodes.push(h(hm[1].length <= 2 ? 'h3' : 'h4', {}, mdInline(hm[2]))); }
+    else if (lm) {
+      flushP();
+      const tag = /^\s*\d/.test(line) ? 'OL' : 'UL';
+      if (!list || list.tagName !== tag) { list = h(tag.toLowerCase(), {}); nodes.push(list); }
+      list.append(h('li', {}, mdInline(lm[1])));
+    } else if (!line.trim()) { flushP(); list = null; }
+    else { list = null; para.push(line.replace(/^>\s?/, '').replace(/^---+$/, '')); }
+  }
+  flushP();
+  return nodes;
+}
+
+function buildAiContext() {
+  if (!S.basis) return { 안내: '자산 데이터가 아직 없습니다' };
+  const ctx = analysisCtx();
+  const health = M.healthScore(ctx);
+  const alerts = M.buildAlerts(ctx);
+  return M.aiContext({ basis: S.basis, assets: ctx.assets, liabilities: ctx.liabilities, cashflowRows: ctx.cashflowRows, cfYear: ctx.cfYear, kpis: ctx.kpis, kpiCtx: ctx.kpiCtx, q: ctx.q, history: ctx.history, settings: S.settings, health, alerts });
+}
+
+async function aiSend(text) {
+  const ai = aiState();
+  text = String(text || '').trim();
+  if (!text) return;
+  if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); return go('settings'); }
+  if (ai.busy) return toast('답변을 생성하는 중입니다', 'err');
+  ai.messages.push({ role: 'user', content: text, at: Date.now() });
+  const reply = { role: 'assistant', content: '', at: Date.now(), model: ai.cfg.model };
+  ai.messages.push(reply);
+  ai.busy = true; ai.abort = new AbortController(); ai.draft = '';
+  render();
+  const history = ai.messages.slice(0, -1).slice(-12).map((m) => ({ role: m.role, content: m.content }));
+  const messages = [{ role: 'system', content: `${SYSTEM_PROMPT}\n\n오늘: ${M.today()}\n[사용자 데이터 JSON]\n${JSON.stringify(buildAiContext())}` }, ...history];
+  try {
+    await chatStream({ cfg: ai.cfg, messages, signal: ai.abort.signal, onDelta: (d, full) => { reply.content = full; if (ai.liveEl) { ai.liveEl.replaceChildren(...md(full)); const log = ai.liveEl.closest('.chat-log'); if (log) log.scrollTop = log.scrollHeight; } } });
+  } catch (e) {
+    if (e.name !== 'AbortError') { reply.content += `\n\n⚠️ 오류: ${e.message}`; toast(e.message, 'err'); }
+    else reply.content += '\n\n(중지됨)';
+  }
+  ai.busy = false; ai.abort = null; ai.liveEl = null;
+  saveChat(ai.messages);
+  render();
+}
+
+function pageAdvisor() {
+  const ai = aiState();
+  const ready = aiReady(ai.cfg);
+  const reports = [...S.data.reports].sort((a, b) => String(b.date).localeCompare(String(a.date)) || M.num(b.order) - M.num(a.order));
+  const input = h('textarea', { class: 'chat-input', rows: 2, placeholder: ready ? '질문을 입력하세요 (Enter 전송 · Shift+Enter 줄바꿈)' : '설정에서 OpenAI API 키를 등록하면 사용할 수 있습니다', 'data-fid': 'ai:input', disabled: !ready,
+    oninput: (e) => { ai.draft = e.target.value; },
+    onkeydown: (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); const v = e.target.value; e.target.value = ''; ai.draft = ''; aiSend(v); } } });
+  input.value = ai.draft || '';
+  const saveReport = async (m) => {
+    const first = m.content.split('\n').find((l) => l.trim())?.replace(/^#+\s*/, '').slice(0, 60) || 'AI 리포트';
+    const v = await ask('리포트 저장', [{ key: 'title', label: '제목', value: first }], '저장');
+    if (!v?.title) return;
+    await addRow('reports', { date: M.today(), title: v.title, model: m.model || ai.cfg.model, content: m.content });
+  };
+  const bubble = (m, i) => {
+    const live = ai.busy && i === ai.messages.length - 1 && m.role === 'assistant';
+    const body = h('div', { class: 'msg-body' }, m.role === 'assistant' ? md(m.content || (live ? '…' : '')) : m.content);
+    if (live) ai.liveEl = body;
+    return h('div', { class: `msg ${m.role}` },
+      h('div', { class: 'msg-meta' }, m.role === 'assistant' ? `✦ ${m.model || 'AI'}` : '나', h('span', { class: 'muted' }, ` · ${new Date(m.at || Date.now()).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}`)),
+      body,
+      m.role === 'assistant' && !live && m.content ? h('div', { class: 'msg-tools' },
+        btn('리포트로 저장', () => saveReport(m), 'small'),
+        btn('복사', () => navigator.clipboard?.writeText(m.content).then(() => toast('복사했습니다')), 'small link')) : null);
+  };
+  const openReport = (r) => modal({ title: r.title, wide: true, cancelText: null, okText: '닫기', body: h('div', { class: 'report-body' }, h('p', { class: 'muted small' }, `${r.date} · ${r.model || ''}`), md(r.content)) });
+  setTimeout(() => { const el = document.querySelector('.chat-log'); if (el) el.scrollTop = el.scrollHeight; }, 0);
+  return h('div', { class: 'stack' },
+    !ready ? h('div', { class: 'banner' }, 'OpenAI API 키가 없습니다. 설정 페이지에서 키를 등록하면 데이터 기반 자산운용 조언을 받을 수 있습니다.', h('span', { class: 'spacer' }), btn('설정으로 이동', () => go('settings'), 'small primary')) : null,
+    toolbar(
+      h('span', { class: `chip-s ${ready ? 'ok' : ''}` }, ready ? `${ai.cfg.model}` : '미연결'),
+      btn('데이터 요약 ' + (ai.showCtx ? '숨기기' : '보기'), () => { ai.showCtx = !ai.showCtx; render(); }, 'small'),
+      h('span', { class: 'spacer' }),
+      ai.messages.length ? btn('새 대화', async () => { if (ai.busy) ai.abort?.abort(); if (!(await confirmBox('새 대화', '현재 대화를 지우고 새로 시작할까요? (저장한 리포트는 유지)', '새로 시작'))) return; ai.messages = []; saveChat([]); render(); }, 'small') : null),
+    ai.showCtx ? card(cardHead('AI 에게 전달되는 데이터 요약', '개인 식별 정보 없이 금액·분류·비율만 보냅니다 (억원 단위)'), h('pre', { class: 'ctx-pre' }, JSON.stringify(buildAiContext(), null, 1))) : null,
+    h('div', { class: 'grid-2 wide-right advisor' },
+      h('div', { class: 'stack' },
+        card(cardHead('빠른 질문', '현재 데이터를 바탕으로 바로 분석합니다'), h('div', { class: 'quick-list' }, QUICK_PROMPTS.map(([label, prompt]) => btn(label, () => aiSend(prompt), '', { disabled: !ready || ai.busy })))),
+        card(cardHead('저장된 리포트', `${reports.length}건 · 엑셀 AI리포트 시트로도 내려받습니다`), reports.length ? h('ul', { class: 'report-list' }, reports.slice(0, 12).map((r) => h('li', {},
+          h('button', { class: 'report-item', onclick: () => openReport(r) }, h('b', {}, r.title), h('span', { class: 'muted small' }, `${r.date} · ${r.model || ''}`)),
+          h('button', { class: 'icon-btn del', title: '삭제', onclick: () => removeRow('reports', r, r.title) }, '✕')))) : h('p', { class: 'muted small' }, '답변 아래 “리포트로 저장” 을 누르면 여기에 보관됩니다.')),
+        h('p', { class: 'muted small' }, '⚠️ AI 의 답변은 일반적인 자산배분 원칙에 따른 참고 정보이며 투자 권유가 아닙니다. 판단과 책임은 본인에게 있습니다.')),
+      card(null, h('div', { class: 'chat' },
+        h('div', { class: 'chat-log' }, ai.messages.length ? ai.messages.map(bubble) : h('div', { class: 'empty-state' }, h('p', {}, '왼쪽의 빠른 질문을 누르거나 아래에 직접 질문하세요.'), h('p', { class: 'muted small' }, '예: “가상자산 비중이 적절한가요?”, “연금저축과 IRP 중 어디에 먼저 넣을까요?”, “이번 분기 KPI 를 맞추려면?”'))),
+        h('div', { class: 'chat-compose' }, input,
+          ai.busy ? btn('■ 중지', () => ai.abort?.abort(), 'ghost-danger') : btn('전송', () => { const v = input.value; input.value = ''; ai.draft = ''; aiSend(v); }, 'primary', { disabled: !ready }))))));
 }
 
 // ---------- 페이지: 관리자 ----------
@@ -1499,7 +1787,7 @@ async function handleUpload(buffer, name = '업로드 파일') {
 window.__assetApp = { handleUpload, state: S, refreshFx };
 
 // ---------- 렌더 ----------
-const PAGE_FN = { dashboard: pageDashboard, assets: pageAssets, liabilities: pageLiabilities, cashflow: pageCashflow, kpi: pageKpi, history: pageHistory, portfolio: pagePortfolio, simulate: pageSimulate, settings: pageSettings, admin: pageAdmin };
+const PAGE_FN = { dashboard: pageDashboard, assets: pageAssets, liabilities: pageLiabilities, cashflow: pageCashflow, kpi: pageKpi, history: pageHistory, portfolio: pagePortfolio, simulate: pageSimulate, advisor: pageAdvisor, settings: pageSettings, admin: pageAdmin };
 
 function go(page) { S.page = page; render(); window.scrollTo(0, 0); }
 

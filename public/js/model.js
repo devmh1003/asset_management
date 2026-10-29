@@ -425,6 +425,168 @@ export function debtPayoff(amount, annualRate, monthly, maxMonths = 600) {
 
 export const TEMPLATE_SCENARIOS = [];
 
+// ---------- 벤치마크 기능: 건강 점수 · 알림 · FIRE · 수수료 · 글라이드패스 · 예산 ----------
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// 0~1 선형 점수: bad 에서 0, good 에서 100
+const lin = (v, bad, good) => clamp(((v - bad) / (good - bad)) * 100, 0, 100);
+
+// 연령 기준 위험자산 목표 비중 (110 − 나이 규칙, 20~90% 로 제한)
+export const glideTarget = (age) => (age ? clamp(110 - age, 20, 90) / 100 : 0.6);
+
+// 월 생활비(원): 해당 연도 현금흐름 지출 평균 (데이터 있는 달만)
+export function monthlyExpense(cashflowRows) {
+  const cf = cashflowSummary(cashflowRows);
+  const months = cf.out.map((v, i) => (cf.inc[i] || cf.out[i] ? v : null)).filter((v) => v !== null);
+  return months.length ? (months.reduce((a, b) => a + b, 0) / months.length) * 10000 : 0;
+}
+
+// 최근 나이: 연도별 추이의 마지막 기록 나이 + 경과 연수
+export function currentAge(history) {
+  const hs = [...history].filter((r) => num(r.age)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const last = hs[hs.length - 1];
+  if (!last) return null;
+  return num(last.age) + (new Date().getFullYear() - Number(String(last.date).slice(0, 4)));
+}
+
+// 재무 건강 점수 (뱅크샐러드 금융건강점수 / Empower Retirement Readiness 벤치마크)
+// ctx: { sum, cashflowRows, history, kpis(올해), kpiCtx, q }
+export function healthScore(ctx) {
+  const { sum } = ctx;
+  const parts = [];
+  if (!sum || !sum.total) return { score: null, grade: '—', parts };
+  const expense = monthlyExpense(ctx.cashflowRows || []);
+  const cash = sum.byGroup?.Var || 0;
+  const months = expense ? cash / expense : null;
+  parts.push({ key: 'emergency', label: '비상자금', weight: 20, score: months == null ? null : lin(months, 0, 6), value: months == null ? '지출 데이터 없음' : `${months.toFixed(1)}개월분`, hint: '현금성 자산 ÷ 월 지출 — 6개월 이상이면 만점' });
+  parts.push({ key: 'debt', label: '부채 건전성', weight: 15, score: lin(sum.debtRatio, 0.5, 0.1), value: fmtPct(sum.debtRatio), hint: '부채비율 10% 이하 만점, 50% 이상 0점' });
+  const cf = cashflowSummary(ctx.cashflowRows || []);
+  const inc = cf.inc.reduce((a, b) => a + b, 0), net = cf.net.reduce((a, b) => a + b, 0);
+  const saveRate = inc ? net / inc : null;
+  parts.push({ key: 'save', label: '저축률', weight: 20, score: saveRate == null ? null : lin(saveRate, 0, 0.4), value: saveRate == null ? '수입 데이터 없음' : fmtPct(saveRate), hint: '순이익 ÷ 수입 — 40% 이상 만점' });
+  const top = Math.max(0, ...Object.values(sum.byMid || {})) / sum.total;
+  parts.push({ key: 'div', label: '분산', weight: 15, score: lin(top, 0.6, 0.15), value: `최대 단일 항목 ${fmtPct(top)}`, hint: '가장 큰 중분류 비중 15% 이하 만점, 60% 이상 0점' });
+  const age = currentAge(ctx.history || []);
+  const tgt = glideTarget(age);
+  const gap = Math.abs(sum.riskRatio - tgt);
+  parts.push({ key: 'risk', label: '위험자산 적정성', weight: 15, score: lin(gap, 0.4, 0.05), value: `${fmtPct(sum.riskRatio)} (기준 ${fmtPct(tgt, 0)})`, hint: age ? `만 ${age}세 기준 110−나이 규칙과의 차이` : '나이 정보가 없어 60% 기준' });
+  const achs = (ctx.kpis || []).map((k) => { const v = kpiValue(k, ctx.q, ctx.kpiCtx).value; return achievement(k, v); }).filter((a) => a != null);
+  const avg = achs.length ? achs.reduce((a, b) => a + Math.min(1, b), 0) / achs.length : null;
+  parts.push({ key: 'kpi', label: 'KPI 달성', weight: 15, score: avg == null ? null : avg * 100, value: avg == null ? 'KPI 없음' : fmtPct(avg, 0), hint: '올해 KPI 평균 달성률 (상한 100%)' });
+  const valid = parts.filter((p) => p.score != null);
+  const w = valid.reduce((s, p) => s + p.weight, 0);
+  const score = w ? Math.round(valid.reduce((s, p) => s + p.score * p.weight, 0) / w) : null;
+  const grade = score == null ? '—' : score >= 85 ? 'A' : score >= 70 ? 'B' : score >= 55 ? 'C' : score >= 40 ? 'D' : 'E';
+  return { score, grade, parts, age, expense, months };
+}
+
+// 알림 센터 — 주의가 필요한 항목 목록 [{ level: bad|warn|info, title, text, page }]
+export function buildAlerts(ctx) {
+  const out = [];
+  const now = new Date();
+  const { sum, liabilities = [], assets = [], settings, cashflowRows = [], kpis = [], history = [], bases: bs = [] } = ctx;
+  const add = (level, title, text, page) => out.push({ level, title, text, page });
+  // 부채
+  for (const l of liabilities) {
+    if (!l.maturity || !num(l.amount)) continue;
+    const days = (new Date(l.maturity) - now) / 86400e3;
+    if (days < 0) add('bad', `만기 경과: ${l.creditor}`, `${l.maturity} 만기 · ${fmtEok(l.amount)}원 — 연장 또는 상환 여부를 확인하세요`, 'liabilities');
+    else if (days <= 90) add('warn', `${Math.ceil(days)}일 내 만기: ${l.creditor}`, `${l.maturity} · ${fmtEok(l.amount)}원`, 'liabilities');
+  }
+  const hi = liabilities.filter((l) => num(l.amount) > 0 && num(l.rate) >= 0.06);
+  if (hi.length) add('warn', '고금리 부채', `${hi.map((l) => `${l.creditor} ${fmtPct(l.rate, 1)}`).join(', ')} — 기대수익률보다 높다면 상환이 우선입니다`, 'simulate');
+  if (sum) {
+    // 비상자금
+    const expense = monthlyExpense(cashflowRows);
+    if (expense) {
+      const months = (sum.byGroup?.Var || 0) / expense;
+      if (months < 3) add(months < 1 ? 'bad' : 'warn', '비상자금 부족', `현금성 자산이 월 지출의 ${months.toFixed(1)}개월분입니다 (권장 3~6개월)`, 'assets');
+    }
+    // 집중
+    const [topKey, topVal] = Object.entries(sum.byMid || {}).sort((a, b) => b[1] - a[1])[0] || [];
+    if (topKey && sum.total && topVal / sum.total > 0.4) add('warn', '단일 자산 집중', `${topKey.replace('|', ' › ')} 비중 ${fmtPct(topVal / sum.total)} — 40% 를 넘습니다`, 'assets');
+    // 연령 대비 위험
+    const age = currentAge(history);
+    const tgt = glideTarget(age);
+    if (sum.riskRatio > tgt + 0.15) add('warn', '위험자산 비중 높음', `${fmtPct(sum.riskRatio)} (연령 기준 ${fmtPct(tgt, 0)}) — 리밸런싱을 검토하세요`, 'simulate');
+    else if (sum.total && sum.riskRatio < tgt - 0.25) add('info', '위험자산 비중 낮음', `${fmtPct(sum.riskRatio)} (연령 기준 ${fmtPct(tgt, 0)}) — 장기 성장성이 낮을 수 있습니다`, 'simulate');
+    // 수수료
+    const fee = feeDrag(assets, settings.fx);
+    if (fee.annual > 0 && sum.total && fee.annual / sum.total > 0.005) add('info', '보수·수수료 부담', `연 ${fmtEok(fee.annual)}원 (총자산의 ${fmtPct(fee.annual / sum.total, 2)}) — 10년 누적 영향 약 ${fmtEok(fee.drag10)}원`, 'assets');
+    // 부채비율
+    if (sum.debtRatio > 0.4) add('warn', '부채비율 높음', `${fmtPct(sum.debtRatio)} — 40% 를 넘습니다`, 'liabilities');
+  }
+  // 환율
+  if (settings?.fxUpdatedAt && (now - new Date(settings.fxUpdatedAt)) / 36e5 > 48) add('info', '환율 정보 오래됨', `마지막 갱신 ${String(settings.fxUpdatedAt).slice(0, 10)}`, 'settings');
+  // 분기 스냅샷
+  const curY = now.getFullYear(), curQ = quarterOf(today());
+  if (bs.length && !bs.some((b) => b.startsWith(String(curY)) && quarterOf(b) === curQ)) add('info', `${curY}년 ${curQ}분기 기준일 없음`, '자산 페이지에서 “새 기준일로 복사” 하면 분기 KPI 가 계산됩니다', 'assets');
+  // KPI 뒤처짐
+  for (const k of kpis) {
+    const v = kpiValue(k, ctx.q, ctx.kpiCtx).value;
+    const a = achievement(k, v);
+    if (a != null && a < 0.8) add('warn', `KPI 미달: ${k.name}`, `달성률 ${fmtPct(a, 0)} — 목표 ${fmtUnit(k.target, metricInfo(k.metric).unit)}`, 'kpi');
+  }
+  // 예산 초과 (이번 달)
+  const over = budgetStatus(cashflowRows, now.getMonth()).filter((b) => b.ratio > 1);
+  if (over.length) add('warn', '이번 달 예산 초과', over.map((b) => `${b.name} ${fmtNum(b.actual)}/${fmtNum(b.budget)}만원`).join(', '), 'cashflow');
+  const rank = { bad: 0, warn: 1, info: 2 };
+  return out.sort((a, b) => rank[a.level] - rank[b.level]);
+}
+
+// 보수·수수료: 자산별 연보수율(fee) 로 연간 비용과 10/20년 복리 손실 추정
+export function feeDrag(assets, fx, rate = 0.05) {
+  let annual = 0, base = 0, w = 0;
+  for (const a of assets) {
+    const f = num(a.fee);
+    if (!f) continue;
+    const k = toKRW(a, fx);
+    annual += k * f; base += k; w += k * f;
+  }
+  const avgFee = base ? w / base : 0;
+  const lose = (n) => base * (Math.pow(1 + rate, n) - Math.pow(1 + rate - avgFee, n));
+  return { annual, base, avgFee, drag10: lose(10), drag20: lose(20) };
+}
+
+// 예산 대비 실적 (지출 행의 budget = 월 예산, 만원). month: 0-based
+export function budgetStatus(cashflowRows, month) {
+  return cashflowRows.filter((r) => r.type === '지출' && num(r.budget) > 0).map((r) => {
+    const actual = num(r.m?.[month]);
+    return { name: r.name, group: r.group, budget: num(r.budget), actual, ratio: actual / num(r.budget) };
+  });
+}
+
+// FIRE: 연 생활비 ÷ 인출률 = 목표 자산. 물가 반영 목표 대비 도달 연도
+export function fireSim({ net, monthlySave, annualRate, annualExpense, swr = 0.04, inflation = 0.025, saveGrowth = 0, years = 40 }) {
+  const fireNumber = swr ? annualExpense / swr : 0;
+  const series = projectNetWorth({ net, monthlySave, annualRate, years, inflation, saveGrowth });
+  let reach = null;
+  for (const p of series) { if (fireNumber && p.nominal >= fireNumber * Math.pow(1 + inflation, p.year)) { reach = p.year; break; } }
+  const coverage = fireNumber ? net / fireNumber : 0;
+  // 코스트 FIRE: 더 저축하지 않아도 N년 후 목표에 도달하는지
+  const coastYears = (() => { if (!fireNumber || net <= 0) return null; for (let y = 0; y <= years; y++) if (net * Math.pow(1 + annualRate, y) >= fireNumber * Math.pow(1 + inflation, y)) return y; return null; })();
+  return { fireNumber, series, reach, coverage, coastYears };
+}
+
+// AI 어드바이저에 보낼 요약 (개인 식별 정보 없음)
+export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kpis, kpiCtx, q, history, settings, health, alerts }) {
+  const sum = summarize(assets, liabilities, settings);
+  const eok = (v) => Math.round(num(v) / 1e4) / 1e4; // 억원 단위 소수
+  const cf = cashflowSummary(cashflowRows);
+  const top = [...assets].map((a) => ({ a, k: toKRW(a, settings.fx) })).sort((x, y) => y.k - x.k).slice(0, 15);
+  return {
+    기준일: basis,
+    요약_억원: { 총자산: eok(sum.total), 총부채: eok(sum.debt), 순자산: eok(sum.net), 부채비율: +sum.debtRatio.toFixed(3), 유동비율: +sum.liquidity.toFixed(3), 위험자산비율: +sum.riskRatio.toFixed(3), 안전자산비율: +sum.safeRatio.toFixed(3), 가중기대수익률: +sum.expRate.toFixed(3) },
+    대분류별_억원: Object.fromEntries(Object.entries(sum.byMajor).map(([k, v]) => [k, eok(v)])),
+    상위자산: top.map(({ a, k }) => ({ 분류: `${a.major}>${a.mid}`, 이름: a.name, 억원: eok(k), 통화: a.currency, 기대수익률: num(a.rate), 보수율: num(a.fee) || undefined })),
+    부채: liabilities.filter((l) => num(l.amount)).map((l) => ({ 채권자: l.creditor, 억원: eok(l.amount), 금리: num(l.rate), 만기: l.maturity || null })),
+    현금흐름_만원: cfYear ? { 연도: cfYear, 월별수입: cf.inc, 월별지출: cf.out, 연간순이익: cf.net.reduce((a, b) => a + b, 0), 지출항목: cashflowRows.filter((r) => r.type === '지출').map((r) => ({ 항목: r.name, 그룹: r.group, 연합계: (r.m || []).reduce((s, v) => s + num(v), 0), 월예산: num(r.budget) || undefined })) } : null,
+    KPI: kpis.map((k) => { const v = kpiValue(k, q, kpiCtx).value; return { 이름: k.name, 지표: k.metric, 목표: k.target, 현재: v == null ? null : +Number(v).toFixed(3), 달성률: achievement(k, v) }; }),
+    연도별추이: [...history].sort((a, b) => String(a.date).localeCompare(String(b.date))).slice(-5).map((r) => ({ 날짜: r.date, 순자산_억원: eok(r.netWorth), 목표_억원: eok(r.target), 나이: num(r.age) || undefined })),
+    건강점수: health ? { 점수: health.score, 등급: health.grade, 항목: health.parts.map((p) => ({ 항목: p.label, 점수: p.score == null ? null : Math.round(p.score), 값: p.value })) } : null,
+    알림: (alerts || []).map((a) => `${a.level}: ${a.title} — ${a.text}`),
+  };
+}
+
 export const fmtKRW = (v) => Math.round(num(v)).toLocaleString('ko-KR');
 export const fmtNum = (v, d = 2) => {
   const n = num(v);

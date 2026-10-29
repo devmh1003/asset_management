@@ -44,6 +44,7 @@ export const SHEETS = [
       col('기대이익률', 'rate', 'pct'),
       calc('기대이익', (r, c) => toKRW(r, c.settings.fx) * num(r.rate), 'num', 14),
       calc('NRV', (r, c) => toKRW(r, c.settings.fx) * (1 + num(r.rate)), 'num', 15),
+      col('연보수율', 'fee', 'pct'),
       col('운용위임사', 'manager', 'text', 14), col('기타사항', 'note', 'text', 20),
     ],
   },
@@ -60,7 +61,7 @@ export const SHEETS = [
     name: '현금흐름(C.F)', col: 'cashflow',
     cols: [
       col('ID', 'id', 'text', 14), col('연도', 'year', 'num', 7), col('구분', 'type', 'text', 7),
-      col('그룹', 'group'), col('항목', 'name', 'text', 14),
+      col('그룹', 'group'), col('항목', 'name', 'text', 14), col('월예산(만원)', 'budget', 'num', 11),
       ...MONTHS.map((h, i) => ({ h, t: 'num', w: 8, get: (r) => num(r.m?.[i]), set: (o, v) => { (o.m ||= Array(12).fill(0))[i] = num(v); } })),
       calc('합계(만원)', (r) => (r.m || []).reduce((s, v) => s + num(v), 0), 'num', 11),
     ],
@@ -102,6 +103,13 @@ export const SHEETS = [
       col('시작 순자산', 'net', 'num', 15), col('월 저축액', 'monthlySave', 'num', 12), col('연 수익률', 'annualRate', 'pct'),
       col('기간(년)', 'years', 'num', 8), col('물가상승률', 'inflation', 'pct'), col('저축 증가율', 'saveGrowth', 'pct'),
       col('목표 금액', 'target', 'num', 15), col('메모', 'note', 'text', 20),
+    ],
+  },
+  {
+    name: 'AI리포트', col: 'reports',
+    cols: [
+      col('ID', 'id', 'text', 14), col('날짜', 'date', 'date', 12), col('제목', 'title', 'text', 24),
+      col('모델', 'model', 'text', 12), col('내용', 'content', 'text', 80),
     ],
   },
   {
@@ -153,6 +161,7 @@ const SORTERS = {
   cashflow: (a, b) => num(a.year) - num(b.year) || (a.type === b.type ? 0 : a.type === '수입' ? -1 : 1) || num(a.order) - num(b.order),
   kpis: (a, b) => num(a.year) - num(b.year) || num(a.order) - num(b.order),
   history: (a, b) => String(a.date).localeCompare(String(b.date)),
+  reports: (a, b) => String(b.date).localeCompare(String(a.date)),
   portfolio: (a, b) => String(a.plan).localeCompare(String(b.plan)) || num(a.order) - num(b.order),
 };
 
