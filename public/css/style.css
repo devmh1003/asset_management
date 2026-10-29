@@ -284,6 +284,18 @@ input[type="range"] { width: 100%; accent-color: var(--accent); height: 20px; ma
 .alerts li.info .alert-dot { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 table.grid td.over { color: var(--danger); font-weight: 700; }
 
+/* ---------- strategy ---------- */
+.strat-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; }
+.strat { border: 1px solid var(--line); border-radius: 12px; padding: 14px; background: var(--panel-2); display: flex; flex-direction: column; gap: 6px; border-left-width: 4px; }
+.strat.high { border-left-color: var(--danger); } .strat.medium { border-left-color: var(--warn); } .strat.low { border-left-color: var(--ok); }
+.strat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.strat-head b { font-size: 14px; flex: 1; min-width: 160px; }
+.strat-impact { font-size: 12px; font-weight: 700; color: var(--ok); background: var(--ok-soft); padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.strat-why { font-size: 12.5px; color: var(--muted); margin: 0; }
+.strat-action { font-size: 13px; margin: 0; }
+.strat-foot { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+.strat-foot .chip { font-size: 11px; padding: 2px 8px; }
+
 /* ---------- AI advisor ---------- */
 .ai-form label { max-width: 520px; }
 .chat { display: flex; flex-direction: column; min-height: 520px; height: calc(100vh - 220px); }

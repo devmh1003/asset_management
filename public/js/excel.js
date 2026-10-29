@@ -113,6 +113,13 @@ export const SHEETS = [
     ],
   },
   {
+    name: '소비내역', col: 'transactions',
+    cols: [
+      col('ID', 'id', 'text', 14), col('날짜', 'date', 'date', 12), col('구분', 'type', 'text', 7), col('내용', 'desc', 'text', 24),
+      col('카테고리', 'category', 'text', 12), col('금액', 'amount', 'num', 13), col('결제수단', 'method', 'text', 12), col('메모', 'note', 'text', 20),
+    ],
+  },
+  {
     name: '관리목표', col: 'goals',
     cols: [
       col('ID', 'id', 'text', 14), col('항목', 'item', 'text', 14), col('목표', 'target', 'text', 16),
@@ -162,6 +169,7 @@ const SORTERS = {
   kpis: (a, b) => num(a.year) - num(b.year) || num(a.order) - num(b.order),
   history: (a, b) => String(a.date).localeCompare(String(b.date)),
   reports: (a, b) => String(b.date).localeCompare(String(a.date)),
+  transactions: (a, b) => String(a.date).localeCompare(String(b.date)) || num(a.order) - num(b.order),
   portfolio: (a, b) => String(a.plan).localeCompare(String(b.plan)) || num(a.order) - num(b.order),
 };
 
@@ -192,6 +200,53 @@ export function exportWorkbook(data, settings, filename) {
     [`• 다운로드 일시: ${new Date().toLocaleString('ko-KR')}`],
   ]);
   guide['!cols'] = [{ wch: 90 }];
+  XLSX.utils.book_append_sheet(wb, guide, '안내');
+  XLSX.writeFile(wb, filename);
+}
+
+// 카드사·은행 이용내역(엑셀/CSV) 을 열 이름 추정으로 소비내역 행으로 변환
+// 반환 { rows:[{date, desc, amount, type, method}], mapping, sheet, skipped }
+const DATE_H = /날짜|일자|거래일|이용일|승인일|일시|date/i;
+const DESC_H = /내용|적요|가맹점|이용처|거래처|이용내역|거래내용|상호|메모|description|merchant|memo/i;
+const AMT_H = /금액|이용금액|승인금액|출금|지출|amount|withdraw|debit/i;
+const IN_H = /입금|수입|deposit|credit/i;
+const METHOD_H = /카드|결제수단|계좌|method|card/i;
+const CAT_H = /카테고리|분류|category/i;
+export function parseStatement(buffer, name = '') {
+  const wb = XLSX.read(buffer, { type: 'array', cellDates: true, codepage: 949 });
+  let best = null;
+  for (const sn of wb.SheetNames) {
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' });
+    // 헤더 행: 날짜 + 금액 열이 함께 있는 첫 행
+    for (let hi = 0; hi < Math.min(aoa.length, 30); hi++) {
+      const hdr = aoa[hi].map((v) => str(v));
+      const di = hdr.findIndex((h) => DATE_H.test(h)), ai = hdr.findIndex((h) => AMT_H.test(h) && !IN_H.test(h));
+      if (di < 0 || ai < 0) continue;
+      const mapping = { date: di, amount: ai, desc: hdr.findIndex((h) => DESC_H.test(h)), income: hdr.findIndex((h) => IN_H.test(h)), method: hdr.findIndex((h) => METHOD_H.test(h)), category: hdr.findIndex((h) => CAT_H.test(h)) };
+      if (mapping.desc < 0) mapping.desc = hdr.findIndex((h, i) => i !== di && i !== ai && h && !/번호|no\.?|순번|잔액|승인번호|할부/i.test(h));
+      const rows = [];
+      let skipped = 0;
+      for (const r of aoa.slice(hi + 1)) {
+        const date = normDate(r[di]);
+        if (!/^\d{4}-\d{2}-\d{2}/.test(date)) { skipped++; continue; }
+        const out = Math.abs(num(r[ai])), inc = mapping.income >= 0 ? Math.abs(num(r[mapping.income])) : 0;
+        if (!out && !inc) { skipped++; continue; }
+        const desc = mapping.desc >= 0 ? str(r[mapping.desc]) : '';
+        rows.push({ date: date.slice(0, 10), desc, amount: out || inc, type: out ? '지출' : '수입', method: mapping.method >= 0 ? str(r[mapping.method]) : (name.replace(/\.[^.]+$/, '') || ''), category: mapping.category >= 0 ? str(r[mapping.category]) : '' });
+      }
+      if (rows.length && (!best || rows.length > best.rows.length)) best = { rows, mapping: Object.fromEntries(Object.entries(mapping).map(([k, i]) => [k, i >= 0 ? hdr[i] : null])), sheet: sn, skipped };
+    }
+  }
+  return best;
+}
+
+// 소비내역만 단독 파일로
+export function exportTransactions(rows, filename) {
+  const spec = SHEETS.find((s) => s.col === 'transactions');
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheetFrom(spec, [...rows].sort(SORTERS.transactions), {}), spec.name);
+  const guide = XLSX.utils.aoa_to_sheet([['소비내역 양식'], ['• 날짜(2026-01-31), 구분(수입/지출), 내용, 카테고리, 금액(원), 결제수단, 메모'], ['• ID 는 비워두면 자동 생성. 같은 파일을 다시 올리면 ID 기준으로 수정됩니다.'], ['• 카드사·은행에서 받은 이용내역 파일은 “명세 가져오기” 로 올리면 열을 자동으로 인식합니다.']]);
+  guide['!cols'] = [{ wch: 80 }];
   XLSX.utils.book_append_sheet(wb, guide, '안내');
   XLSX.writeFile(wb, filename);
 }
@@ -240,6 +295,7 @@ export function parseWorkbook(buffer, fallbackBasis = today()) {
       if (spec.col === 'assets' && !o.currency) o.currency = 'KRW';
       if (spec.col === 'cashflow') { o.year = num(o.year) || new Date().getFullYear(); o.m ||= Array(12).fill(0); }
       if (spec.col === 'kpis') { o.year = num(o.year) || new Date().getFullYear(); o.q ||= [null, null, null, null]; o.dir = o.dir === 'down' ? 'down' : 'up'; }
+      if (spec.col === 'transactions') { o.type = o.type === '수입' ? '수입' : '지출'; o.amount = Math.abs(num(o.amount)); }
       out.push(o);
     });
     result.collections[spec.col] = out;

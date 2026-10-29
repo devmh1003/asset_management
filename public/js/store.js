@@ -1,7 +1,7 @@
 // 데이터 저장소: Firebase(Firestore + Auth) 또는 로컬(localStorage) 백엔드
 import { firebaseConfig } from './firebase-config.js';
 
-export const COLLECTIONS = ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports'];
+export const COLLECTIONS = ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports', 'transactions'];
 // ?local=1 을 붙이면 Firebase 설정이 있어도 로컬 모드로 동작 (개발·테스트용)
 export const isFirebaseConfigured = !!(firebaseConfig && firebaseConfig.apiKey) && !new URLSearchParams(location.search).has('local');
 

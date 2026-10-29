@@ -567,8 +567,188 @@ export function fireSim({ net, monthlySave, annualRate, annualExpense, swr = 0.0
   return { fireNumber, series, reach, coverage, coastYears };
 }
 
+// ---------- 소비내역 (거래 단위) ----------
+export const TX_CATEGORIES = ['식비', '카페/간식', '교통', '주거/공과금', '통신', '쇼핑', '문화/여가', '의료/건강', '교육', '보험', '경조사', '구독', '여행', '생활용품', '투자', '이체', '급여', '기타'];
+export const TX_RULES = [
+  [/스타벅스|starbucks|투썸|이디야|메가커피|컴포즈|빽다방|커피|카페|cafe|배스킨|던킨|베이커리|파리바게|뚜레쥬르|디저트/i, '카페/간식'],
+  [/배달의민족|배민|요기요|쿠팡이츠|맥도날드|버거킹|롯데리아|kfc|맘스터치|서브웨이|식당|치킨|피자|김밥|국밥|분식|음식|푸드|food|한식|중식|일식|고기|횟집|곱창|족발|보쌈|마라|교촌|bbq|bhc|스시|초밥|밥/i, '식비'],
+  [/지하철|버스|교통|택시|카카오t|kakao t|타다|코레일|ktx|srt|주유|gs칼텍스|sk에너지|s-oil|현대오일|주차|하이패스|톨게이트|따릉이|킥보드/i, '교통'],
+  [/관리비|월세|전기|한전|가스|수도|도시가스|아파트|임대료/, '주거/공과금'],
+  [/skt|kt\b|lg u\+|lgu|유플러스|통신|휴대폰|알뜰폰|인터넷/i, '통신'],
+  [/넷플릭스|netflix|유튜브|youtube|스포티파이|spotify|멜론|웨이브|wavve|티빙|tving|디즈니|disney|쿠팡와우|chatgpt|openai|claude|notion|adobe|icloud|구글 원|google one|구독|멤버십/i, '구독'],
+  [/쿠팡|coupang|네이버페이|naver|11번가|g마켓|gmarket|옥션|무신사|지그재그|에이블리|올리브영|다이소|이마트|홈플러스|롯데마트|코스트코|costco|마켓컬리|컬리|ssg|백화점|유니클로|자라|zara|h&m|나이키|아디다스/i, '쇼핑'],
+  [/cgv|메가박스|롯데시네마|영화|공연|콘서트|전시|티켓|인터파크|예스24|yes24|교보문고|알라딘|스팀|steam|닌텐도|플레이스테이션|게임|노래방|볼링|pc방|골프|헬스|피트니스|요가|필라테스|수영/i, '문화/여가'],
+  [/병원|의원|약국|치과|한의원|안과|피부과|정형외과|내과|건강검진|의료/, '의료/건강'],
+  [/학원|교육|강의|인프런|클래스101|유데미|udemy|coursera|수강|교재|도서/i, '교육'],
+  [/보험|생명|화재|손해보험|삼성화재|현대해상|db손보|kb손보|메리츠/i, '보험'],
+  [/경조사|축의|부의|조의|결혼|돌잔치|장례/, '경조사'],
+  [/항공|대한항공|아시아나|제주항공|진에어|티웨이|에어부산|호텔|hotel|airbnb|에어비앤비|야놀자|여기어때|아고다|agoda|부킹|booking|트립|여행|면세/i, '여행'],
+  [/증권|주식|etf|펀드|코인|업비트|빗썸|적금|예금|연금|irp|isa|투자/i, '투자'],
+  [/급여|월급|상여|성과급|salary/i, '급여'],
+  [/이체|송금|카드대금|카드 대금|결제대금|자동이체|출금/, '이체'],
+];
+export function classifyTx(desc) {
+  const s = String(desc || '');
+  if (!s.trim()) return null;
+  for (const [re, c] of TX_RULES) if (re.test(s)) return c;
+  return null;
+}
+// 월별·카테고리별 지출 합계 (원). rows: 해당 연도 거래
+export function txSummary(rows, year) {
+  const byMonth = Array(12).fill(0), byCat = {}, byMonthCat = Array.from({ length: 12 }, () => ({}));
+  let income = 0;
+  for (const r of rows) {
+    if (String(r.date).slice(0, 4) !== String(year)) continue;
+    const m = Number(String(r.date).slice(5, 7)) - 1;
+    if (m < 0 || m > 11) continue;
+    const v = Math.abs(num(r.amount));
+    if (r.type === '수입') { income += v; continue; }
+    byMonth[m] += v;
+    const c = r.category || '기타';
+    byCat[c] = (byCat[c] || 0) + v;
+    byMonthCat[m][c] = (byMonthCat[m][c] || 0) + v;
+  }
+  return { byMonth, byCat, byMonthCat, income };
+}
+// 중복 판정 키 (날짜+내용+금액)
+export const txKey = (r) => `${r.date}|${String(r.desc || '').trim()}|${Math.round(num(r.amount))}`;
+
+// ---------- 자산 증식 전략 추천 엔진 ----------
+// 대분류별 연 변동성 가정 (몬테카를로·최적화용). 분류체계에 없는 대분류는 그룹 기본값
+export const VOL_BY_MAJOR = { 현금: 0.005, 채권형자산: 0.05, '연금/보험': 0.08, 부동산: 0.12, 투자: 0.18, 가상자산: 0.7, 대체투자: 0.25, 기타: 0.1 };
+export const VOL_BY_GROUP = { Var: 0.005, Fixed: 0.07, Risk: 0.2 };
+export const RET_BY_MAJOR = { 현금: 0.025, 채권형자산: 0.045, '연금/보험': 0.05, 부동산: 0.04, 투자: 0.08, 가상자산: 0.15, 대체투자: 0.08, 기타: 0.02 };
+
+export function portfolioStats(weights, rets, vols, rho = 0.35, rf = 0.03) {
+  const ks = Object.keys(weights);
+  let mu = 0, v = 0;
+  for (const i of ks) {
+    mu += weights[i] * (rets[i] ?? 0);
+    for (const j of ks) v += weights[i] * weights[j] * (vols[i] ?? 0) * (vols[j] ?? 0) * (i === j ? 1 : rho);
+  }
+  const sigma = Math.sqrt(Math.max(0, v));
+  return { mu, sigma, sharpe: sigma ? (mu - rf) / sigma : 0 };
+}
+
+// 포트폴리오 최적화: 무작위 탐색(Dirichlet) 으로 최대 샤프 + 리스크 패리티 근사. opts.maxW 상한, opts.minCash 현금 하한
+export function optimizePortfolio(majors, rets, vols, { n = 4000, maxW = 0.6, minCash = 0, rho = 0.35, rf = 0.03, seed = 1 } = {}) {
+  let s = seed;
+  const rnd = () => { s = (s * 1664525 + 1013904223) % 4294967296; return s / 4294967296; };
+  const sample = () => {
+    const g = majors.map(() => -Math.log(rnd() + 1e-12));
+    const t = g.reduce((a, b) => a + b, 0);
+    const w = Object.fromEntries(majors.map((m, i) => [m, g[i] / t]));
+    if (w.현금 != null && w.현금 < minCash) { const d = minCash - w.현금; w.현금 = minCash; const others = majors.filter((m) => m !== '현금'); const ot = others.reduce((a, m) => a + w[m], 0) || 1; for (const m of others) w[m] -= d * (w[m] / ot); }
+    return w;
+  };
+  let best = null;
+  for (let i = 0; i < n; i++) {
+    const w = sample();
+    if (majors.some((m) => w[m] > maxW || w[m] < 0)) continue;
+    const st = portfolioStats(w, rets, vols, rho, rf);
+    if (!best || st.sharpe > best.stats.sharpe) best = { weights: w, stats: st };
+  }
+  // 리스크 패리티: 1/σ 비례
+  const inv = majors.map((m) => 1 / Math.max(0.003, vols[m] ?? 0.1));
+  const ti = inv.reduce((a, b) => a + b, 0);
+  const rp = Object.fromEntries(majors.map((m, i) => [m, inv[i] / ti]));
+  return { maxSharpe: best, riskParity: { weights: rp, stats: portfolioStats(rp, rets, vols, rho, rf) } };
+}
+
+// 몬테카를로: 기하 브라운 운동(월 단위), n 경로. 결과 연도별 p10/p50/p90 + 목표 도달 확률
+export function monteCarlo({ net, monthlySave, mu, sigma, years, n = 1000, inflation = 0, saveGrowth = 0, target = 0, seed = 7 }) {
+  let s = seed;
+  const rnd = () => { s = (s * 1664525 + 1013904223) % 4294967296; return s / 4294967296; };
+  const gauss = () => { const u = rnd() || 1e-12, v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+  const mm = Math.log(1 + mu) / 12 - (sigma * sigma) / 24, ms = sigma / Math.sqrt(12);
+  const paths = Array.from({ length: years + 1 }, () => []);
+  let hit = 0;
+  for (let p = 0; p < n; p++) {
+    let v = net, save = monthlySave, reached = false;
+    paths[0].push(v);
+    for (let y = 1; y <= years; y++) {
+      for (let m = 0; m < 12; m++) v = v * Math.exp(mm + ms * gauss()) + save;
+      save *= 1 + saveGrowth;
+      paths[y].push(v);
+      if (target && v >= target * Math.pow(1 + inflation, y)) reached = true;
+    }
+    if (reached) hit++;
+  }
+  const pct = (arr, q) => { const a = [...arr].sort((x, y) => x - y); return a[Math.min(a.length - 1, Math.floor(q * a.length))]; };
+  return { years: paths.map((arr, y) => ({ year: y, p10: pct(arr, 0.1), p25: pct(arr, 0.25), p50: pct(arr, 0.5), p75: pct(arr, 0.75), p90: pct(arr, 0.9) })), probTarget: target ? hit / n : null };
+}
+
+// 규칙 기반 전략 추천. 반환 [{ id, title, why, action, impact(연간 원, 추정), tags, level }]
+export function recommendStrategies(ctx) {
+  const { sum, assets = [], liabilities = [], cashflowRows = [], history = [], settings } = ctx;
+  const out = [];
+  if (!sum || !sum.total) return out;
+  const fx = settings.fx;
+  const expense = monthlyExpense(cashflowRows);
+  const cf = cashflowSummary(cashflowRows);
+  const income = cf.inc.reduce((a, b) => a + b, 0) * 10000;
+  const saveRate = income ? (cf.net.reduce((a, b) => a + b, 0) * 10000) / income : null;
+  const age = currentAge(history);
+  const cash = sum.byGroup?.Var || 0;
+  const midAmt = (re) => assets.filter((a) => re.test(`${a.major}|${a.mid}|${a.name}`)).reduce((s, a) => s + toKRW(a, fx), 0);
+  const add = (o) => out.push({ level: 'medium', tags: [], ...o });
+  // 1. 비상자금
+  if (expense) {
+    const months = cash / expense;
+    if (months < 3) add({ id: 'emergency', level: 'high', title: '비상자금부터 3개월분 확보', why: `현금성 자산이 월 지출의 ${months.toFixed(1)}개월분입니다.`, action: `파킹통장/CMA 에 월 ${fmtEok(Math.min(expense, (3 - months) * expense / 6))}원씩 자동이체해 ${fmtEok(3 * expense)}원을 먼저 채우세요. 그 전까지 위험자산 추가 매수는 보류.`, impact: 0, tags: ['안전망'] });
+    // 4. 유휴 현금
+    const excess = cash - 6 * expense;
+    if (excess > 5e6) add({ id: 'idle-cash', level: 'high', title: '유휴 현금을 투자로 전환 (6개월분 초과분)', why: `현금성 자산 ${fmtEok(cash)}원 중 비상자금 6개월분(${fmtEok(6 * expense)}원)을 넘는 ${fmtEok(excess)}원이 대기 중입니다.`, action: `초과분을 3~6개월에 나눠 적립식(DCA)으로 글로벌 분산 ETF 등에 투자하세요. 한 번에 넣지 말고 분할 매수로 타이밍 위험을 줄입니다.`, impact: excess * 0.04, tags: ['DCA', '기회비용'] });
+  }
+  // 5. 파킹 금리 최적화
+  const idle = assets.filter((a) => a.major === '현금' && /입출금|예금/.test(a.mid) && num(a.rate) < 0.02).reduce((s, a) => s + toKRW(a, fx), 0);
+  if (idle > 3e6) add({ id: 'parking', title: '입출금·저금리 예금을 파킹통장/CMA 로', why: `금리 2% 미만 현금 ${fmtEok(idle)}원이 있습니다.`, action: '생활비 1개월분만 입출금에 두고 나머지는 연 3% 내외의 파킹통장·CMA·MMF 로 옮기세요 (즉시 출금 가능).', impact: idle * 0.025, tags: ['무위험 수익'] });
+  // 1-2. 고금리 부채
+  for (const l of liabilities) {
+    const amt = num(l.amount), r = num(l.rate);
+    if (amt > 0 && r >= 0.05) add({ id: `debt-${l.id || l.creditor}`, level: r >= 0.07 ? 'high' : 'medium', title: `고금리 부채 우선 상환: ${l.creditor} (${fmtPct(r, 1)})`, why: `연이자 ${fmtEok(amt * r)}원. 확실한 ${fmtPct(r, 1)} 수익과 같습니다${sum.expRate < r ? ` (포트폴리오 기대수익률 ${fmtPct(sum.expRate)} 보다 높음)` : ''}.`, action: `여유 현금과 월 저축의 일부를 이 부채 조기상환에 배정하거나, 더 낮은 금리로 대환(갈아타기)을 알아보세요.`, impact: amt * r, tags: ['부채', '확정수익'] });
+  }
+  // 2. 연금계좌 세액공제
+  const pension = midAmt(/연금저축|IRP/i);
+  const canSave = cash > (expense ? 3 * expense : 0) + 9e6 || (saveRate != null && saveRate > 0.2);
+  if (canSave) add({ id: 'pension-tax', level: 'high', title: '연금저축 + IRP 로 연 900만원 세액공제', why: `연금저축·IRP 납입액 연 900만원(연금저축 600만원 한도)까지 13.2~16.5% 세액공제 → 최대 ${fmtEok(9e6 * 0.165)}원 환급.${pension ? ` 현재 연금계좌 ${fmtEok(pension)}원 보유.` : ' 연금계좌가 없거나 적습니다.'}`, action: '월 75만원 자동이체로 한도를 채우고, 계좌 안에서는 저보수 글로벌 ETF/TDF 로 운용하세요. 퇴직연금(DC) 도 디폴트옵션 대신 직접 포트폴리오 지정.', impact: 9e6 * 0.132, tags: ['절세', '장기'] });
+  // 3. ISA
+  const isa = midAmt(/ISA/i);
+  if (!isa) add({ id: 'isa', title: 'ISA 계좌로 비과세·분리과세 혜택', why: 'ISA 는 순이익 200만원(서민형 400만원)까지 비과세, 초과분 9.9% 분리과세. 만기 후 연금계좌 이전 시 추가 세액공제(최대 300만원).', action: '국내 상장 해외 ETF·배당주·예금을 ISA 안에서 운용하세요 (연 2천만원, 총 1억 납입 한도).', impact: 2e6 * 0.154 + 1e6 * 0.054, tags: ['절세'] });
+  // 6. 수수료
+  const fee = feeDrag(assets, fx);
+  const hiFee = assets.filter((a) => num(a.fee) >= 0.005);
+  if (hiFee.length) add({ id: 'fee', title: '고보수 상품을 저보수 ETF 로 교체', why: `연보수 0.5% 이상 상품 ${hiFee.length}개, 연 ${fmtEok(hiFee.reduce((s, a) => s + toKRW(a, fx) * num(a.fee), 0))}원 비용. 20년 누적 영향 ${fmtEok(fee.drag20)}원.`, action: '같은 지수를 추종하는 보수 0.1% 내외 ETF 로 갈아타세요. 펀드→ETF 전환 시 환매 수수료·세금 확인.', impact: hiFee.reduce((s, a) => s + toKRW(a, fx) * (num(a.fee) - 0.001), 0), tags: ['비용'] });
+  // 7. 글라이드패스 / 8. 분산
+  const tgt = glideTarget(age);
+  if (sum.riskRatio < tgt - 0.15 && (!expense || cash / expense >= 3)) add({ id: 'glide-up', title: '위험자산 비중을 연령 기준까지 단계적으로 확대', why: `위험자산 ${fmtPct(sum.riskRatio)} vs 연령 기준 ${fmtPct(tgt, 0)}${age ? ` (만 ${age}세)` : ''}. 장기 기대수익을 놓치고 있습니다.`, action: `차이 ${fmtEok((tgt - sum.riskRatio) * sum.total)}원을 12개월에 걸쳐 매월 분할 매수(DCA). 글로벌 주식 ETF 중심.`, impact: (tgt - sum.riskRatio) * sum.total * 0.04, tags: ['자산배분', 'DCA'] });
+  if (sum.riskRatio > tgt + 0.15) add({ id: 'glide-down', level: 'high', title: '위험자산 비중 축소 (연령 기준 초과)', why: `위험자산 ${fmtPct(sum.riskRatio)} 로 연령 기준 ${fmtPct(tgt, 0)} 을 크게 넘습니다. 하락장에서 회복에 오래 걸릴 수 있습니다.`, action: `초과분 ${fmtEok((sum.riskRatio - tgt) * sum.total)}원을 채권·현금성으로 옮기고, 이후 5%p 밴드 리밸런싱 규칙을 적용하세요.`, impact: 0, tags: ['위험관리'] });
+  const [topKey, topVal] = Object.entries(sum.byMid || {}).sort((a, b) => b[1] - a[1])[0] || [];
+  if (topKey && topVal / sum.total > 0.4) add({ id: 'concentration', level: 'high', title: `단일 자산 집중 완화: ${topKey.replace('|', ' › ')}`, why: `총자산의 ${fmtPct(topVal / sum.total)} 가 한 항목에 몰려 있습니다.`, action: '목표 비중(≤25%)을 정하고 초과분을 분기마다 나눠 매도·분산하세요. 세금(양도세·배당세)과 거래비용을 고려해 분할.', impact: 0, tags: ['분산'] });
+  const crypto = (sum.byMajor['가상자산'] || 0) / sum.total;
+  if (crypto > 0.2) add({ id: 'crypto', level: 'high', title: '가상자산 비중 20% 이하로 관리', why: `가상자산 ${fmtPct(crypto)} — 변동성 연 70% 수준으로 포트폴리오 변동의 대부분을 차지합니다.`, action: '목표 비중을 5~15% 로 정하고 상승 시 초과분을 자동 매도(리밸런싱)해 이익을 실현하세요. 스테이킹 수익은 세금 신고 대상.', impact: 0, tags: ['위험관리'] });
+  // 9. DCA
+  const monthlySave = Math.round((cf.net.reduce((a, b) => a + b, 0) / 12) * 10000);
+  if (monthlySave > 3e5) add({ id: 'dca', title: `월 ${fmtEok(monthlySave)}원 자동 적립투자 (DCA) 설정`, why: `월평균 순저축 ${fmtEok(monthlySave)}원이 발생합니다. 자동화하면 타이밍 고민 없이 저축률이 유지됩니다.`, action: '급여일 다음 날 연금계좌·ISA·일반계좌 순으로 자동이체 + ETF 자동매수(증권사 적립식 기능)를 설정하세요.', impact: monthlySave * 12 * 0.06 * 0.5, tags: ['자동화', 'DCA'] });
+  // 10. 인플레이션 헤지 / 11. 통화 분산
+  const gold = midAmt(/원자재|금\/실물|골드|gold/i) / sum.total;
+  if (gold < 0.03) add({ id: 'hedge', level: 'low', title: '금·원자재 5% 로 인플레이션 헤지', why: `금/원자재 비중 ${fmtPct(gold)}. 주식·채권과 상관관계가 낮아 포트폴리오 변동성을 줄입니다.`, action: 'KRX 금현물(수수료·세금 유리) 또는 금 ETF 로 총자산의 3~5%.', impact: 0, tags: ['분산', '헤지'] });
+  const usd = assets.filter((a) => a.currency === 'USD' || /해외|미국|달러|S&P|나스닥/i.test(`${a.mid} ${a.name}`)).reduce((s, a) => s + toKRW(a, fx), 0) / sum.total;
+  if (usd < 0.15) add({ id: 'currency', level: 'low', title: '달러 자산 비중 확대 (환 분산)', why: `달러·해외 자산 비중 ${fmtPct(usd)}. 원화 편중은 환율 급등기에 구매력이 떨어집니다.`, action: '해외 주식 ETF(환노출형)·달러 예금 등으로 총자산의 20~40% 를 달러 자산으로.', impact: 0, tags: ['분산'] });
+  else if (usd > 0.6) add({ id: 'currency-high', level: 'low', title: '달러 자산 편중 완화', why: `달러·해외 자산 비중 ${fmtPct(usd)}.`, action: '환헤지형 ETF 일부 편입 또는 원화 자산 보강.', impact: 0, tags: ['분산'] });
+  // 12. 저축률
+  if (saveRate != null && saveRate < 0.3 && income) add({ id: 'save-rate', level: 'high', title: '저축률 30% 까지 끌어올리기', why: `현재 저축률 ${fmtPct(saveRate)}. 소비내역·예산 기능으로 고정비(구독·통신·보험)를 먼저 점검하세요.`, action: `월 ${fmtEok(((0.3 - saveRate) * income) / 12)}원을 추가로 저축하면 30% 에 도달합니다. 급여 인상분은 전액 저축으로.`, impact: (0.3 - saveRate) * income, tags: ['현금흐름'] });
+  // 13. 리밸런싱 밴드 규칙
+  add({ id: 'band', level: 'low', title: '5%p 밴드 리밸런싱 규칙 운영', why: '목표 비중에서 ±5%p 이상 벗어날 때만 거래하면 거래비용을 줄이면서 고점 매도·저점 매수가 자동으로 일어납니다.', action: '분기마다(기준일 생성 시) 리밸런싱 탭에서 편차를 확인하고 초과분만 조정. 신규 저축으로 부족 자산을 채우면 매도 없이 가능.', impact: sum.total * 0.003, tags: ['규칙', '자산배분'] });
+  // 14. 퇴직연금 운용
+  const dc = assets.filter((a) => /퇴직연금|IRP|DC/i.test(`${a.mid} ${a.name}`) && num(a.rate) < 0.03);
+  if (dc.length) add({ id: 'dc', title: '퇴직연금/IRP 를 원리금보장에서 TDF·ETF 로', why: `기대수익률 3% 미만으로 설정된 연금 자산 ${fmtEok(dc.reduce((s, a) => s + toKRW(a, fx), 0))}원.`, action: '은퇴 예정 연도의 TDF 또는 글로벌 주식 ETF 70% + 채권 30% 로 변경 (위험자산 한도 70%).', impact: dc.reduce((s, a) => s + toKRW(a, fx), 0) * 0.03, tags: ['연금', '장기'] });
+  const rank = { high: 0, medium: 1, low: 2 };
+  return out.sort((a, b) => rank[a.level] - rank[b.level] || b.impact - a.impact);
+}
+
 // AI 어드바이저에 보낼 요약 (개인 식별 정보 없음)
-export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kpis, kpiCtx, q, history, settings, health, alerts }) {
+export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kpis, kpiCtx, q, history, settings, health, alerts, strategies, transactions }) {
   const sum = summarize(assets, liabilities, settings);
   const eok = (v) => Math.round(num(v) / 1e4) / 1e4; // 억원 단위 소수
   const cf = cashflowSummary(cashflowRows);
@@ -584,6 +764,8 @@ export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kp
     연도별추이: [...history].sort((a, b) => String(a.date).localeCompare(String(b.date))).slice(-5).map((r) => ({ 날짜: r.date, 순자산_억원: eok(r.netWorth), 목표_억원: eok(r.target), 나이: num(r.age) || undefined })),
     건강점수: health ? { 점수: health.score, 등급: health.grade, 항목: health.parts.map((p) => ({ 항목: p.label, 점수: p.score == null ? null : Math.round(p.score), 값: p.value })) } : null,
     알림: (alerts || []).map((a) => `${a.level}: ${a.title} — ${a.text}`),
+    자동추천전략: (strategies || []).map((s) => `[${s.level}] ${s.title} (연 효과 ${fmtEok(s.impact)}원)`),
+    최근소비_카테고리별_만원: transactions ? Object.fromEntries(Object.entries(txSummary(transactions, new Date().getFullYear()).byCat).map(([k, v]) => [k, Math.round(v / 1e4)])) : undefined,
   };
 }
 
