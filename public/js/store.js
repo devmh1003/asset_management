@@ -1,8 +1,9 @@
 // 데이터 저장소: Firebase(Firestore + Auth) 또는 로컬(localStorage) 백엔드
 import { firebaseConfig } from './firebase-config.js';
 
-export const COLLECTIONS = ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals'];
-export const isFirebaseConfigured = !!(firebaseConfig && firebaseConfig.apiKey);
+export const COLLECTIONS = ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios'];
+// ?local=1 을 붙이면 Firebase 설정이 있어도 로컬 모드로 동작 (개발·테스트용)
+export const isFirebaseConfigured = !!(firebaseConfig && firebaseConfig.apiKey) && !new URLSearchParams(location.search).has('local');
 
 const FB = 'https://www.gstatic.com/firebasejs/10.12.2';
 
@@ -37,10 +38,12 @@ class LocalBackend {
   async putMany(col, rows) { const t = (this.db[col] ||= {}); for (const r of rows) t[r.id] = clean(r); this._save(); }
   async replace(col, rows) { this.db[col] = {}; await this.putMany(col, rows); }
   async saveSettings(s) { this.db.settings = s; this._save(); }
+  async getTaxonomyTemplate() { return this.db.taxonomyTemplate || null; }
+  async setTaxonomyTemplate(taxonomy) { this.db.taxonomyTemplate = taxonomy; this._save(); }
 }
 
 class FirebaseBackend {
-  constructor() { this.kind = 'firebase'; this.uid = null; }
+  constructor() { this.kind = 'firebase'; this.uid = null; this.viewUid = null; }
   async init() {
     const [appMod, authMod, fs] = await Promise.all([
       import(`${FB}/firebase-app.js`),
@@ -61,8 +64,52 @@ class FirebaseBackend {
   signUpEmail(email, pw) { return this.a.createUserWithEmailAndPassword(this.auth, email, pw); }
   signOut() { return this.a.signOut(this.auth); }
 
-  _col(c) { return this.fs.collection(this.db, 'users', this.uid, c); }
-  _doc(c, id) { return this.fs.doc(this.db, 'users', this.uid, c, id); }
+  _col(c) { return this.fs.collection(this.db, 'users', this.activeUid, c); }
+  _doc(c, id) { return this.fs.doc(this.db, 'users', this.activeUid, c, id); }
+
+  // ---- 프로필 / 관리자 ----
+  // 로그인한 본인 프로필을 갱신 (관리자 계정 목록에 사용)
+  async touchProfile(user) {
+    const ref = this.fs.doc(this.db, 'profiles', user.uid);
+    const snap = await this.fs.getDoc(ref);
+    const base = snap.exists() ? snap.data() : { createdAt: new Date().toISOString() };
+    const data = { ...base, email: user.email || '', name: user.displayName || base.name || '', photo: user.photoURL || '', lastLogin: new Date().toISOString(), provider: user.providerData?.[0]?.providerId || '' };
+    await this.fs.setDoc(ref, data);
+    return data;
+  }
+  async isAdmin(email) {
+    if (!email) return false;
+    try { const s = await this.fs.getDoc(this.fs.doc(this.db, 'admins', email)); return s.exists(); } catch { return false; }
+  }
+  async listAdmins() {
+    const snap = await this.fs.getDocs(this.fs.collection(this.db, 'admins'));
+    return snap.docs.map((d) => ({ email: d.id, ...d.data() }));
+  }
+  addAdmin(email, by) { return this.fs.setDoc(this.fs.doc(this.db, 'admins', email), { addedAt: new Date().toISOString(), by }); }
+  removeAdmin(email) { return this.fs.deleteDoc(this.fs.doc(this.db, 'admins', email)); }
+  async listProfiles() {
+    const snap = await this.fs.getDocs(this.fs.collection(this.db, 'profiles'));
+    return snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
+  }
+  updateProfile(uid, patch) { return this.fs.setDoc(this.fs.doc(this.db, 'profiles', uid), patch, { merge: true }); }
+  async userStats(uid) {
+    const out = {};
+    await Promise.all(COLLECTIONS.map(async (c) => { const s = await this.fs.getDocs(this.fs.collection(this.db, 'users', uid, c)); out[c] = s.size; }));
+    return out;
+  }
+  async deleteUserData(uid) {
+    for (const c of COLLECTIONS.concat('meta')) {
+      const s = await this.fs.getDocs(this.fs.collection(this.db, 'users', uid, c));
+      await this._batch(s.docs.map((d) => (b) => b.delete(d.ref)));
+    }
+  }
+  async getTaxonomyTemplate() {
+    try { const s = await this.fs.getDoc(this.fs.doc(this.db, 'meta', 'taxonomyTemplate')); return s.exists() ? s.data().taxonomy : null; } catch { return null; }
+  }
+  setTaxonomyTemplate(taxonomy, by) { return this.fs.setDoc(this.fs.doc(this.db, 'meta', 'taxonomyTemplate'), { taxonomy, updatedAt: new Date().toISOString(), by }); }
+  // 관리자가 다른 사용자의 데이터를 읽기 전용으로 열람
+  viewAs(uid) { this.viewUid = uid; }
+  get activeUid() { return this.viewUid || this.uid; }
 
   async loadAll() {
     const out = {};

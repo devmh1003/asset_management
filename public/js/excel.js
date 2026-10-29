@@ -87,6 +87,24 @@ export const SHEETS = [
     ],
   },
   {
+    name: 'KPI', col: 'kpis',
+    cols: [
+      col('ID', 'id', 'text', 14), col('연도', 'year', 'num', 7), col('KPI명', 'name', 'text', 16),
+      col('지표', 'metric', 'text', 14), col('방향(up/down)', 'dir', 'text', 12), col('목표', 'target', 'num', 14),
+      ...[1, 2, 3, 4].map((q) => ({ h: `${q}Q 실적(수동)`, t: 'num', w: 13, get: (r) => (r.q?.[q - 1] ?? ''), set: (o, v) => { (o.q ||= [null, null, null, null])[q - 1] = v === '' || v == null ? null : num(v); } })),
+      col('메모', 'note', 'text', 20),
+    ],
+  },
+  {
+    name: '시나리오', col: 'scenarios',
+    cols: [
+      col('ID', 'id', 'text', 14), col('이름', 'name', 'text', 18), col('종류', 'kind', 'text', 10),
+      col('시작 순자산', 'net', 'num', 15), col('월 저축액', 'monthlySave', 'num', 12), col('연 수익률', 'annualRate', 'pct'),
+      col('기간(년)', 'years', 'num', 8), col('물가상승률', 'inflation', 'pct'), col('저축 증가율', 'saveGrowth', 'pct'),
+      col('목표 금액', 'target', 'num', 15), col('메모', 'note', 'text', 20),
+    ],
+  },
+  {
     name: '관리목표', col: 'goals',
     cols: [
       col('ID', 'id', 'text', 14), col('항목', 'item', 'text', 14), col('목표', 'target', 'text', 16),
@@ -133,6 +151,7 @@ function sheetFrom(spec, rows, ctx) {
 const SORTERS = {
   assets: (a, b) => String(a.basis).localeCompare(String(b.basis)) || num(a.order) - num(b.order),
   cashflow: (a, b) => num(a.year) - num(b.year) || (a.type === b.type ? 0 : a.type === '수입' ? -1 : 1) || num(a.order) - num(b.order),
+  kpis: (a, b) => num(a.year) - num(b.year) || num(a.order) - num(b.order),
   history: (a, b) => String(a.date).localeCompare(String(b.date)),
   portfolio: (a, b) => String(a.plan).localeCompare(String(b.plan)) || num(a.order) - num(b.order),
 };
@@ -159,6 +178,7 @@ export function exportWorkbook(data, settings, filename) {
     ['• 퍼센트 열은 0.15 또는 15% 형식으로 입력하세요.'],
     ['• 날짜는 2026-01-01 형식을 권장합니다 (2026.01.01 / 26.1.1 도 인식).'],
     ['• 현금흐름(C.F) 금액 단위는 만원, 나머지는 원(통화별 금액은 해당 통화) 입니다.'],
+    ['• KPI 시트의 분기 실적은 비워두면 앱이 자동 계산하고, 값을 넣으면 그 값이 우선합니다.'],
     ['• 업로드 시 "교체" 를 선택하면 이 파일에 있는 시트의 데이터로 전부 바뀌고, "병합" 은 ID 기준으로 추가/수정만 합니다.'],
     [`• 다운로드 일시: ${new Date().toLocaleString('ko-KR')}`],
   ]);
@@ -210,6 +230,7 @@ export function parseWorkbook(buffer, fallbackBasis = today()) {
       if (spec.col === 'assets' && !o.basis) o.basis = fallbackBasis;
       if (spec.col === 'assets' && !o.currency) o.currency = 'KRW';
       if (spec.col === 'cashflow') { o.year = num(o.year) || new Date().getFullYear(); o.m ||= Array(12).fill(0); }
+      if (spec.col === 'kpis') { o.year = num(o.year) || new Date().getFullYear(); o.q ||= [null, null, null, null]; o.dir = o.dir === 'down' ? 'down' : 'up'; }
       out.push(o);
     });
     result.collections[spec.col] = out;

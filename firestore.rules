@@ -1,9 +1,38 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 각 사용자는 자신의 users/{uid} 하위 문서만 읽고 쓸 수 있음
-    match /users/{userId}/{document=**} {
-      allow read, write: if request.auth != null && request.auth.uid == userId;
+    // 관리자: 아래 목록의 이메일 또는 admins/{email} 문서가 있는 계정
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.token.email in ['devmh1003@gmail.com'] ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.token.email))
+      );
+    }
+    function isSelf(uid) { return request.auth != null && request.auth.uid == uid; }
+    // 관리자가 비활성화한 계정은 쓰기 불가
+    function isActive() {
+      return !exists(/databases/$(database)/documents/profiles/$(request.auth.uid)) ||
+        get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.disabled != true;
+    }
+
+    match /admins/{email} {
+      allow read: if request.auth != null && (request.auth.token.email == email || isAdmin());
+      allow write: if isAdmin();
+    }
+    // 관리자가 편집하는 추천 분류 템플릿 (모든 로그인 사용자가 읽음)
+    match /meta/taxonomyTemplate {
+      allow read: if request.auth != null;
+      allow write: if isAdmin();
+    }
+    match /profiles/{uid} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow create, update: if (isSelf(uid) && !('disabled' in request.resource.data.diff(resource == null ? {} : resource.data).affectedKeys())) || isAdmin();
+      allow delete: if isAdmin();
+    }
+    // 각 사용자는 자신의 users/{uid} 하위 문서만 읽고 쓸 수 있음. 관리자는 열람·정리 가능
+    match /users/{uid}/{document=**} {
+      allow read: if isSelf(uid) || isAdmin();
+      allow write: if (isSelf(uid) && isActive()) || isAdmin();
     }
   }
 }
