@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
     // 관리자: 아래 목록의 이메일 또는 admins/{email} 문서가 있는 계정
     function isAdmin() {
-      return request.auth != null && (
+      return request.auth != null && request.auth.token.email_verified == true && (
         request.auth.token.email in ['devmh1003@gmail.com'] ||
         exists(/databases/$(database)/documents/admins/$(request.auth.token.email))
       );
