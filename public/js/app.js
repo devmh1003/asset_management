@@ -687,16 +687,22 @@ async function aiClassify() {
   const ai = aiState();
   if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); return go('settings'); }
   const tax = S.settings.taxonomy;
-  const rows = basisAssets().filter((r) => r.name && (!r.major || !r.mid || (r.major === tax[0]?.major && r.mid === tax[0]?.mids[0])));
-  if (!rows.length) return toast('분류할 항목이 없습니다 — 이미 모두 분류되어 있습니다');
-  toast(`${rows.length}개 항목을 AI 로 분류하는 중…`);
+  const candidates = basisAssets().filter((r) => r.name && (!r.major || !r.mid || (r.major === tax[0]?.major && r.mid === tax[0]?.mids[0])));
+  if (!candidates.length) return toast('분류할 항목이 없습니다 — 이미 모두 분류되어 있습니다');
+  // 키워드 규칙이 맞는 항목은 규칙을 우선 적용하고, 규칙이 없는 항목만 AI 에 보낸다
+  const changed = [], rows = [];
+  for (const r of candidates) {
+    const cls = M.classifyName(r.name) || M.classifyName(r.manager);
+    if (cls) { if (cls[0] !== r.major || cls[1] !== r.mid) { r.major = cls[0]; r.mid = cls[1]; ensureMid(cls[0], cls[1]); changed.push(r); } }
+    else rows.push(r);
+  }
+  if (rows.length) toast(`${rows.length}개 항목을 AI 로 분류하는 중…`);
   const taxonomyText = tax.map((t) => `${t.major}: ${t.mids.join(', ')}`).join('\n');
   try {
-    const j = await chatJson({ cfg: ai.cfg, messages: [
-      { role: 'system', content: `한국 개인 자산 항목을 아래 분류체계로 분류하라. 반드시 JSON {"items":[{"id":"...","major":"...","mid":"...","currency":"KRW"}]} 형식만 출력하고 major/mid 는 분류체계에 있는 값만 사용한다. 통화는 이름에서 명확할 때만 KRW 외 값을 쓴다.\n분류체계:\n${taxonomyText}` },
-      { role: 'user', content: JSON.stringify(rows.map((r) => ({ id: r.id, name: r.name, manager: r.manager || '', note: r.note || '' }))) },
-    ] });
-    const changed = [];
+    const j = rows.length ? await chatJson({ cfg: ai.cfg, messages: [
+      { role: 'system', content: `한국 개인 자산 항목을 아래 분류체계로 분류하라. 반드시 JSON {"items":[{"id":"...","major":"...","mid":"...","currency":"KRW"}]} 형식만 출력하고 major/mid 는 분류체계에 있는 값만 사용한다. 각 항목의 current 는 현재 분류이며 더 적합한 분류가 분명할 때만 바꾼다. 생활비·월급통장은 '현금 > 입출금', 대기자금·파킹은 '현금 > 파킹/CMA'. 통화는 이름에서 명확할 때만 KRW 외 값을 쓴다.\n분류체계:\n${taxonomyText}` },
+      { role: 'user', content: JSON.stringify(rows.map((r) => ({ id: r.id, name: r.name, manager: r.manager || '', note: r.note || '', current: `${r.major} > ${r.mid}` }))) },
+    ] }) : { items: [] };
     for (const it of j.items || []) {
       const r = rows.find((x) => x.id === it.id), t = tax.find((x) => x.major === it.major);
       if (!r || !t || !t.mids.includes(it.mid)) continue;
