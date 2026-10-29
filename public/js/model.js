@@ -494,7 +494,7 @@ export function buildAlerts(ctx) {
   }
   const hi = liabilities.filter((l) => num(l.amount) > 0 && num(l.rate) >= 0.06);
   if (hi.length) add('warn', '고금리 부채', `${hi.map((l) => `${l.creditor} ${fmtPct(l.rate, 1)}`).join(', ')} — 기대수익률보다 높다면 상환이 우선입니다`, 'simulate');
-  if (sum) {
+  if (sum && sum.total) {
     // 비상자금
     const expense = monthlyExpense(cashflowRows);
     if (expense) {
@@ -527,7 +527,7 @@ export function buildAlerts(ctx) {
     if (a != null && a < 0.8) add('warn', `KPI 미달: ${k.name}`, `달성률 ${fmtPct(a, 0)} — 목표 ${fmtUnit(k.target, metricInfo(k.metric).unit)}`, 'kpi');
   }
   // 예산 초과 (이번 달)
-  const over = budgetStatus(cashflowRows, now.getMonth()).filter((b) => b.ratio > 1);
+  const over = budgetStatus(ctx.cashflowRowsNow || cashflowRows, now.getMonth()).filter((b) => b.ratio > 1);
   if (over.length) add('warn', '이번 달 예산 초과', over.map((b) => `${b.name} ${fmtNum(b.actual)}/${fmtNum(b.budget)}만원`).join(', '), 'cashflow');
   const rank = { bad: 0, warn: 1, info: 2 };
   return out.sort((a, b) => rank[a.level] - rank[b.level]);
@@ -617,7 +617,7 @@ export const txKey = (r) => `${r.date}|${String(r.desc || '').trim()}|${Math.rou
 // 대분류별 연 변동성 가정 (몬테카를로·최적화용). 분류체계에 없는 대분류는 그룹 기본값
 export const VOL_BY_MAJOR = { 현금: 0.005, 채권형자산: 0.05, '연금/보험': 0.08, 부동산: 0.12, 투자: 0.18, 가상자산: 0.7, 대체투자: 0.25, 기타: 0.1 };
 export const VOL_BY_GROUP = { Var: 0.005, Fixed: 0.07, Risk: 0.2 };
-export const RET_BY_MAJOR = { 현금: 0.025, 채권형자산: 0.045, '연금/보험': 0.05, 부동산: 0.04, 투자: 0.08, 가상자산: 0.15, 대체투자: 0.08, 기타: 0.02 };
+export const RET_BY_MAJOR = { 현금: 0.03, 채권형자산: 0.045, '연금/보험': 0.05, 부동산: 0.04, 투자: 0.08, 가상자산: 0.15, 대체투자: 0.08, 기타: 0.02 };
 
 export function portfolioStats(weights, rets, vols, rho = 0.35, rf = 0.03) {
   const ks = Object.keys(weights);

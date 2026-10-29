@@ -76,7 +76,8 @@ function toast(msg, kind = 'ok') {
 }
 
 function select(options, value, onchange, props = {}) {
-  const opts = [...new Set([...options, value].filter((v) => v !== undefined && v !== null && v !== ''))];
+  const has = value === undefined || value === null || value === '' || options.some((o) => (typeof o === 'object' ? o.value : o) === value);
+  const opts = has ? options : [...options, value];
   const el = h('select', { ...props, onchange: (e) => onchange(e.target.value) },
     props.placeholder !== false ? h('option', { value: '' }, '—') : null,
     opts.map((o) => (typeof o === 'object' ? h('option', { value: o.value }, o.label) : h('option', { value: o }, o))));
@@ -172,7 +173,7 @@ async function reload() {
   try { S.taxTemplate = (await S.be.getTaxonomyTemplate()) || null; } catch { S.taxTemplate = null; }
   const merged = M.mergeTaxonomy(S.settings.taxonomy, S.taxTemplate || M.DEFAULT_TAXONOMY);
   S.settings.taxonomy = merged.taxonomy;
-  if (!all.settings || merged.changed) await S.be.saveSettings(S.settings);
+  if ((!all.settings || merged.changed) && !S.readOnly) await S.be.saveSettings(S.settings);
   syncSelections();
 }
 
@@ -499,6 +500,7 @@ function analysisCtx(sum = summary(), year = Number(String(S.basis).slice(0, 4))
   return {
     sum, q, bases: bs, cfYear,
     cashflowRows: S.data.cashflow.filter((r) => M.num(r.year) === cfYear),
+    cashflowRowsNow: S.data.cashflow.filter((r) => M.num(r.year) === thisYear()),
     kpis: S.data.kpis.filter((k) => M.num(k.year) === year).sort((a, b) => M.num(a.order) - M.num(b.order)),
     kpiCtx: kpiCtx(), history: S.data.history, liabilities: S.data.liabilities, assets: basisAssets(), settings: S.settings,
   };
@@ -1011,7 +1013,7 @@ function pageHistory() {
     rows.length ? h('div', { class: 'kpis' },
       kpi('최근 순자산', `${M.fmtEok(last.netWorth)}원`, last.date, 'accent'),
       kpi('최근 증가율', growth[last.id] != null ? M.fmtPct(growth[last.id]) : '—', '직전 기록 대비'),
-      kpi('연평균 성장률 (CAGR)', cagr != null ? M.fmtPct(cagr) : '—', `${first.date} → ${last.date}`),
+      kpi('연평균 성장률 (CAGR)', Number.isFinite(cagr) ? M.fmtPct(cagr) : '—', `${first.date} → ${last.date}`),
       kpi('목표 달성률', M.num(last.target) ? M.fmtPct(M.num(last.netWorth) / M.num(last.target)) : '—', `목표 ${M.fmtEok(last.target)}원`)) : null,
     card('연도별 자산증가율', grid({ cols, rows, coll: 'history', label: (r) => r.date })),
     rows.length ? card('순자산 vs 목표', chart('c-hist2', historyChartConfig(rows))) : null);
@@ -1127,7 +1129,14 @@ function slider(label, key, obj, { min, max, step, fmt, pct, onchange }) {
   const input = h('input', {
     type: 'text', class: 'num sim-val', inputmode: 'decimal', 'data-fid': `sim:${key}`,
     value: pct ? +(val * 100).toFixed(2) : M.fmtNum(val),
-    onchange: (e) => { const p = M.parseAmount(e.target.value); obj[key] = pct ? M.num(e.target.value) / 100 : p.value; onchange(); },
+    onchange: (e) => {
+      const p = M.parseAmount(e.target.value);
+      let v = pct ? M.num(e.target.value) / 100 : p.value;
+      // 정수 슬라이더(연수·나이)는 정수로, 범위 밖 값은 범위 안으로
+      if (!pct && Number.isInteger(step) && step >= 1) v = Math.max(min, Math.min(max, Math.round(v)));
+      if (!Number.isFinite(v)) v = min;
+      obj[key] = v; onchange();
+    },
     onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); },
   });
   const range = h('input', {
@@ -1139,7 +1148,7 @@ function slider(label, key, obj, { min, max, step, fmt, pct, onchange }) {
 
 function pageSimulate() {
   // 기준일이 바뀌었거나 데이터 입력 전(순자산 0)에 만들어진 기본값이면 다시 계산
-  if (!S.sim || S.simBasis !== S.basis || (S.sim.net === 0 && S.basis)) { S.sim = simDefaults(); S.simBasis = S.basis; }
+  if (!S.sim || S.simBasis !== S.basis || (S.sim.net === 0 && simDefaults().net)) { S.sim = simDefaults(); S.simBasis = S.basis; }
   if (!S.simTab) S.simTab = 'project';
   const tabs = [['project', '순자산 전망'], ['rebalance', '리밸런싱'], ['debt', '부채 상환'], ['fire', '은퇴 · FIRE']];
   const tabBar = h('div', { class: 'tabs' }, tabs.map(([id, label]) => h('button', { class: `tab ${S.simTab === id ? 'active' : ''}`, onclick: () => { S.simTab = id; render(); } }, label)));
@@ -1164,7 +1173,7 @@ function requiredSave(f, years) {
   return Math.ceil(hi / 1e4) * 1e4;
 }
 function simFire() {
-  if (!S.fire || S.fireBasis !== S.basis || (S.fire.net === 0 && S.basis)) { S.fire = fireDefaults(); S.fireBasis = S.basis; }
+  if (!S.fire || S.fireBasis !== S.basis || (S.fire.net === 0 && simDefaults().net)) { S.fire = fireDefaults(); S.fireBasis = S.basis; }
   const f = S.fire;
   const rerender = () => render();
   const r = M.fireSim({ ...f, years: 45 });
@@ -1288,8 +1297,8 @@ function simProject() {
 function simRebalance() {
   if (!S.basis) return card('리밸런싱', emptyState('자산 데이터가 필요합니다.', []));
   const sum = summary();
+  if (!S.rebal || S.rebalBasis !== S.basis) { S.rebal = Object.fromEntries(S.settings.taxonomy.map((t) => t.major).filter((m) => (sum.byMajor[m] || 0) > 0).map((m) => [m, sum.total ? +(((sum.byMajor[m] || 0) / sum.total) * 100).toFixed(1) : 0])); S.rebalBasis = S.basis; }
   const majors = S.settings.taxonomy.map((t) => t.major).filter((m) => (sum.byMajor[m] || 0) > 0 || S.rebal?.[m]);
-  if (!S.rebal || S.rebalBasis !== S.basis) { S.rebal = Object.fromEntries(majors.map((m) => [m, +((sum.byMajor[m] || 0) / sum.total * 100).toFixed(1)])); S.rebalBasis = S.basis; }
   const tgtSum = majors.reduce((s, m) => s + M.num(S.rebal[m]), 0);
   const rows = M.rebalance(sum.byMajor, S.rebal, sum.total).filter((r) => majors.includes(r.major));
   const groupOf = Object.fromEntries(S.settings.taxonomy.map((t) => [t.major, t.group]));
@@ -1445,7 +1454,7 @@ function pageTransactions() {
   const ts = M.txSummary(S.data.transactions, year);
   const spent = ts.byMonth[mi];
   const prevSpent = mi > 0 ? ts.byMonth[mi - 1] : M.txSummary(S.data.transactions, year - 1).byMonth[11];
-  const cats = Object.entries(ts.byMonthCat[mi] || {}).sort((a, b) => b[1] - a[1]);
+  const cats = Object.entries(ts.byMonthCat[mi] || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
   const daysInMonth = new Date(year, mi + 1, 0).getDate();
   const isCur = S.txMonth === curMonth();
   const dayN = isCur ? new Date().getDate() : daysInMonth;
@@ -1674,14 +1683,15 @@ function aiState() {
 
 function aiSettingsCard() {
   const ai = aiState();
-  const d = { ...ai.cfg };
+  // 입력 중인 값은 S.ai.form 에 보관 (환율 갱신 등 다른 렌더에 지워지지 않도록)
+  const d = (ai.form ||= { ...ai.cfg });
   const key = h('input', { type: 'password', value: d.key, placeholder: 'sk-…', autocomplete: 'off', 'data-fid': 'ai:key', oninput: (e) => { d.key = e.target.value.trim(); } });
   const model = h('input', { type: 'text', value: d.model, list: 'dl-ai-models', autocomplete: 'off', 'data-fid': 'ai:model', oninput: (e) => { d.model = e.target.value.trim(); } });
   const endpoint = h('input', { type: 'text', value: d.endpoint, placeholder: DEFAULT_AI.endpoint, 'data-fid': 'ai:endpoint', oninput: (e) => { d.endpoint = e.target.value.trim() || DEFAULT_AI.endpoint; } });
   const status = h('span', { class: `chip-s ${aiReady(ai.cfg) ? 'ok' : ''}` }, aiReady(ai.cfg) ? `연결됨 · ${ai.cfg.model} · ${ai.cfg.key ? maskKey(ai.cfg.key) : '프록시'}` : '미설정');
   const save = async (test) => {
     if (!d.key && d.endpoint === DEFAULT_AI.endpoint) return toast('API 키를 입력하세요', 'err');
-    saveAiConfig(d); ai.cfg = loadAiConfig();
+    saveAiConfig(d); ai.cfg = loadAiConfig(); ai.form = null;
     if (test) {
       status.textContent = '테스트 중…';
       try { const m = await testConnection(ai.cfg); toast(`연결 성공 (${m})`); } catch (e) { toast(`연결 실패: ${e.message}`, 'err'); }
@@ -1696,7 +1706,7 @@ function aiSettingsCard() {
       h('label', {}, h('span', {}, '엔드포인트 (프록시를 쓸 때만 변경)'), endpoint)),
     h('div', { class: 'row', style: { marginTop: '10px' } },
       btn('저장', () => save(false), 'primary'), btn('저장 후 연결 테스트', () => save(true)),
-      ai.cfg.key ? btn('키 삭제', () => { saveAiConfig({ ...DEFAULT_AI }); ai.cfg = loadAiConfig(); render(); toast('키를 삭제했습니다'); }, 'ghost-danger') : null,
+      ai.cfg.key ? btn('키 삭제', () => { saveAiConfig({ ...DEFAULT_AI }); ai.cfg = loadAiConfig(); ai.form = null; render(); toast('키를 삭제했습니다'); }, 'ghost-danger') : null,
       h('a', { href: 'https://platform.openai.com/api-keys', target: '_blank', rel: 'noopener', class: 'btn link' }, 'API 키 발급 ↗')),
     h('p', { class: 'muted small', style: { marginTop: '10px' } }, '질문할 때 자산·부채·현금흐름·KPI 의 요약(이름·금액·분류)이 OpenAI 로 전송됩니다. 비용은 OpenAI 계정에서 모델별 토큰 단가로 청구되며, gpt-4o-mini 기준 질문 1회 ≈ 1~3원 수준입니다. 공용 PC 에서는 사용 후 키를 삭제하세요.'));
 }
