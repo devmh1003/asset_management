@@ -1,0 +1,10 @@
+# 개인 자산 원본 엑셀은 저장소에 올리지 않음 (공개 저장소)
+*.xlsx
+*.xls
+~$*
+
+node_modules/
+.firebase/
+firebase-debug.log
+.DS_Store
+Thumbs.db
