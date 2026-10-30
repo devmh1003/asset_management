@@ -19,6 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+      # 파일 주소에 배포 버전을 붙여, 브라우저 캐시(최대 10분)에 남은 옛 JS 와 새 JS 가 섞이지 않도록
+      - name: Stamp asset versions
+        run: |
+          V=${GITHUB_SHA::8}
+          sed -i -E "s#from '\./([a-z-]+\.js)'#from './\1?v=$V'#g" public/js/*.js
+          sed -i -E "s#(src|href)=\"(js/app\.js|css/style\.css)\"#\1=\"\2?v=$V\"#g" public/index.html
+          grep -c "?v=$V" public/index.html public/js/*.js
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
