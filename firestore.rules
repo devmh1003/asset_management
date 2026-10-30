@@ -9,24 +9,53 @@ service cloud.firestore {
       );
     }
     function isSelf(uid) { return request.auth != null && request.auth.uid == uid; }
-    // 관리자가 비활성화한 계정은 쓰기 불가
-    function isActive() {
-      return !exists(/databases/$(database)/documents/profiles/$(request.auth.uid)) ||
-        get(/databases/$(database)/documents/profiles/$(request.auth.uid)).data.disabled != true;
+    function profilePath(uid) { return /databases/$(database)/documents/profiles/$(uid); }
+    function configPath() { return /databases/$(database)/documents/meta/appConfig; }
+    // 관리자가 켠 가입 승인제
+    function approvalRequired() {
+      return exists(configPath()) && get(configPath()).data.get('approvalRequired', false) == true;
     }
+    // 쓰기 가능한 계정: 비활성·승인대기가 아닌 계정 (프로필이 없으면 승인제가 꺼져 있을 때만)
+    function isActive() {
+      return exists(profilePath(request.auth.uid))
+        ? (get(profilePath(request.auth.uid)).data.get('disabled', false) != true
+           && get(profilePath(request.auth.uid)).data.get('pending', false) != true)
+        : !approvalRequired();
+    }
+    // 사용자가 스스로 바꿀 수 없는 프로필 필드
+    function adminOnlyKeys() { return ['disabled', 'pending', 'memo', 'approvedAt', 'approvedBy']; }
 
     match /admins/{email} {
       allow read: if request.auth != null && (request.auth.token.email == email || isAdmin());
       allow write: if isAdmin();
     }
-    // 관리자가 편집하는 추천 분류 템플릿 (모든 로그인 사용자가 읽음)
-    match /meta/taxonomyTemplate {
+    // 관리자가 편집하는 추천 분류 템플릿(taxonomyTemplate)과 운영 설정(appConfig: 공지·가입 승인제)
+    match /meta/{docId} {
       allow read: if request.auth != null;
       allow write: if isAdmin();
     }
     match /profiles/{uid} {
       allow read: if isSelf(uid) || isAdmin();
-      allow create, update: if (isSelf(uid) && !('disabled' in request.resource.data.diff(resource == null ? {} : resource.data).affectedKeys())) || isAdmin();
+      allow create: if isAdmin() || (isSelf(uid)
+        && !request.resource.data.keys().hasAny(['disabled', 'memo', 'approvedAt', 'approvedBy'])
+        && (!approvalRequired() || request.resource.data.get('pending', false) == true));
+      allow update: if isAdmin() || (isSelf(uid)
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(adminOnlyKeys()));
+      // 본인 탈퇴 시 삭제 가능 (비활성 계정은 우회 방지를 위해 불가)
+      allow delete: if isAdmin() || (isSelf(uid) && resource.data.get('disabled', false) != true);
+    }
+    // 변경 이력: 본인 이름·서버 시각으로만 추가, 수정 불가, 삭제는 관리자만
+    match /auditLogs/{logId} {
+      allow read: if isAdmin() || (request.auth != null && resource.data.uid == request.auth.uid);
+      allow create: if request.auth != null
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.get('email', '')
+        && request.resource.data.at == request.time
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'action', 'target', 'detail', 'at', 'subject'])
+        && request.resource.data.action is string && request.resource.data.action.size() <= 40
+        && request.resource.data.target is string && request.resource.data.target.size() <= 300
+        && request.resource.data.detail is string && request.resource.data.detail.size() <= 2000;
+      allow update: if false;
       allow delete: if isAdmin();
     }
     // 각 사용자는 자신의 users/{uid} 하위 문서만 읽고 쓸 수 있음. 관리자는 열람·정리 가능

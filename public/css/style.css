@@ -335,6 +335,45 @@ table.grid td.over { color: var(--danger); font-weight: 700; }
 .avatar { width: 36px; height: 36px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); display: grid; place-items: center; font-weight: 800; }
 .admin-user.disabled { opacity: .6; }
 .admin-user .meta { font-size: 12px; color: var(--muted); }
+.admin-user .row { justify-content: flex-end; }
+@media (max-width: 900px) { .admin-user { grid-template-columns: auto 1fr; } .admin-user > .row { grid-column: 1 / -1; justify-content: flex-start; } }
+.tab-badge { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--warn); color: #fff; font-size: 11px; line-height: 18px; text-align: center; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--panel); }
+.seg button { border: 0; background: none; padding: 6px 12px; cursor: pointer; font-weight: 600; color: var(--muted); font-size: 13px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button.active { background: var(--accent-soft); color: var(--accent); }
+.log-table td { vertical-align: top; }
+.log-detail { white-space: normal; min-width: 280px; max-width: 640px; font-size: 12px; color: var(--muted); word-break: break-all; }
+.nowrap { white-space: nowrap; }
+.plain-list { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; font-size: 13px; max-height: 50vh; overflow: auto; }
+textarea { width: 100%; font: inherit; font-size: 14px; color: var(--text); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; resize: vertical; }
+textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+.w-110 { width: 110px; }
+.steps { margin: 4px 0 14px; padding-left: 20px; display: grid; gap: 6px; font-size: 14px; }
+
+/* 공지 · 상태 배너 */
+.notice { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 10px; font-size: 13px; background: var(--accent-soft); color: var(--accent); }
+.notice.warn { background: var(--warn-soft); color: var(--warn); }
+.notice-text { color: var(--text); white-space: pre-wrap; }
+.banner.bad { background: var(--danger-soft); color: var(--danger); }
+
+/* 로그인 소개 · 개인정보 안내 */
+.login-wrap { display: flex; gap: 40px; align-items: center; justify-content: center; flex-wrap: wrap; width: min(900px, 100%); }
+.login-intro { flex: 1 1 320px; max-width: 420px; display: flex; flex-direction: column; gap: 10px; }
+.login-intro .logo { width: 46px; height: 46px; font-size: 24px; border-radius: 13px; }
+.login-intro h1 { font-size: 28px; }
+.login-card h2 { font-size: 17px; margin: 0 0 4px; }
+.feature-list { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 10px; }
+.feature-list li { display: grid; gap: 2px; padding-left: 14px; border-left: 3px solid var(--accent-soft); font-size: 14px; }
+.feature-list li span { font-size: 13px; }
+.ok-msg { color: var(--ok); font-size: 13px; min-height: 0; margin: 0; }
+.ok-msg:empty { display: none; }
+.consent { margin: 4px 0 0; line-height: 1.5; }
+.consent a { color: var(--accent); }
+.privacy { display: grid; grid-template-columns: 110px 1fr; gap: 10px 14px; margin: 0; font-size: 14px; }
+.privacy dt { font-weight: 700; }
+.privacy dd { margin: 0; color: var(--muted); line-height: 1.55; }
+@media (max-width: 600px) { .privacy { grid-template-columns: 1fr; gap: 2px; } .privacy dd { margin-bottom: 8px; } .login-wrap { gap: 20px; } .login-intro h1 { font-size: 22px; } }
 
 /* ---------- print ---------- */
 @media print {

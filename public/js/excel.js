@@ -46,6 +46,7 @@ export const SHEETS = [
       calc('NRV', (r, c) => toKRW(r, c.settings.fx) * (1 + num(r.rate)), 'num', 15),
       col('연보수율', 'fee', 'pct'),
       col('운용위임사', 'manager', 'text', 14), col('기타사항', 'note', 'text', 20),
+      col('부동산ID', 'reId', 'text', 14),
     ],
   },
   {
@@ -55,6 +56,23 @@ export const SHEETS = [
       col('만기일', 'maturity', 'date', 12), col('금리', 'rate', 'pct'),
       calc('연이자', (r) => num(r.amount) * num(r.rate), 'num', 13),
       col('상환방식', 'repay'), col('기타사항', 'note', 'text', 20),
+      col('부동산ID', 'reId', 'text', 14),
+    ],
+  },
+  {
+    name: '부동산', col: 'realestate',
+    cols: [
+      col('ID', 'id', 'text', 14), col('명칭', 'name', 'text', 18), col('유형', 'type', 'text', 10), col('용도', 'use', 'text', 10),
+      col('주소', 'address', 'text', 24), col('전용면적(㎡)', 'area', 'num', 10), col('지분율', 'share', 'pct'),
+      col('취득일', 'acqDate', 'date', 12), col('취득가', 'acqPrice', 'num', 15), col('취득부대비용', 'acqCost', 'num', 13),
+      col('현재시세', 'value', 'num', 15), col('시세기준일', 'valuedAt', 'date', 12),
+      col('연결대출ID', 'loanId', 'text', 14),
+      calc('연결대출', (r, c) => c.loanName[r.loanId] || '', 'text', 14),
+      col('임대보증금', 'deposit', 'num', 14), col('월세', 'rent', 'num', 11), col('연보유비용', 'holdCost', 'num', 12),
+      col('기대상승률', 'rate', 'pct'),
+      { h: '시세이력', t: 'text', w: 30, get: (r) => (r.valuations || []).map((v) => `${v.date}=${num(v.value)}`).join('; '),
+        set: (o, v) => { o.valuations = str(v).split(/[;\n]/).map((x) => x.split('=')).filter(([d, n]) => /^\d{4}-\d{2}-\d{2}$/.test(str(d)) && n != null).map(([d, n]) => ({ date: str(d), value: num(n) })); } },
+      col('메모', 'note', 'text', 20),
     ],
   },
   {
@@ -135,7 +153,8 @@ function context(data, settings) {
   for (const p of data.portfolio) planTotal[p.plan] = (planTotal[p.plan] || 0) + num(p.amount);
   const hs = [...data.history].sort((a, b) => String(a.date).localeCompare(String(b.date)));
   hs.forEach((h, i) => { if (i > 0 && num(hs[i - 1].netWorth)) growth[h.id] = (num(h.netWorth) - num(hs[i - 1].netWorth)) / num(hs[i - 1].netWorth); });
-  return { settings, basisTotal, planTotal, growth };
+  const loanName = Object.fromEntries((data.liabilities || []).map((l) => [l.id, l.creditor]));
+  return { settings, basisTotal, planTotal, growth, loanName };
 }
 
 function cellValue(c, r, ctx) {
@@ -278,7 +297,7 @@ export function parseWorkbook(buffer, fallbackBasis = today()) {
     if (!ws) continue;
     const { header, rows } = readTable(ws);
     const idx = spec.cols.map((c) => header.indexOf(c.h));
-    const missing = spec.cols.filter((c, i) => !c.calc && c.h !== 'ID' && idx[i] < 0).map((c) => c.h);
+    const missing = spec.cols.filter((c, i) => !c.calc && c.h !== 'ID' && c.k !== 'reId' && idx[i] < 0).map((c) => c.h);
     const out = [];
     rows.forEach((row, ri) => {
       if (!row.some((v) => str(v) !== '')) return;
@@ -291,10 +310,18 @@ export function parseWorkbook(buffer, fallbackBasis = today()) {
       });
       if (!o.id) o.id = uid() + ri;
       o.order = ri;
+      if ('reId' in o && !o.reId) delete o.reId;
       if (spec.col === 'assets' && !o.basis) o.basis = fallbackBasis;
       if (spec.col === 'assets' && !o.currency) o.currency = 'KRW';
       if (spec.col === 'cashflow') { o.year = num(o.year) || new Date().getFullYear(); o.m ||= Array(12).fill(0); }
       if (spec.col === 'kpis') { o.year = num(o.year) || new Date().getFullYear(); o.q ||= [null, null, null, null]; o.dir = o.dir === 'down' ? 'down' : 'up'; }
+      // 지분율 0(빈칸) 은 단독 소유(100%) 로 간주
+      if (spec.col === 'realestate') {
+        // 빈칸인 면적·기대상승률은 '미입력'(null) 로 유지
+        for (const k of ['area', 'rate']) { const ci = spec.cols.findIndex((c) => c.k === k); if (idx[ci] < 0 || str(row[idx[ci]]) === '') o[k] = null; }
+        if (!num(o.share)) o.share = 1;
+        o.valuations ||= [];
+      }
       if (spec.col === 'transactions') { o.type = o.type === '수입' ? '수입' : '지출'; o.amount = Math.abs(num(o.amount)); }
       out.push(o);
     });

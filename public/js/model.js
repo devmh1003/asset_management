@@ -11,7 +11,7 @@ export const DEFAULT_TAXONOMY = [
   { major: '대체투자', group: 'Risk', mids: ['NFT', 'P2P', 'PF', '비상장주식/스타트업', '크라우드펀딩', '미술품/조각투자', '기타'] },
   { major: '채권형자산', group: 'Fixed', mids: ['국내채권', '해외채권', 'P2P', 'PF', '대여금'] },
   { major: '연금/보험', group: 'Fixed', mids: ['연금저축', 'IRP', '퇴직연금', '저축성보험'] },
-  { major: '부동산', group: 'Fixed', mids: ['거주용', '투자용', '리츠'] },
+  { major: '부동산', group: 'Fixed', mids: ['거주용', '임대용', '투자용', '토지', '분양권', '리츠'] },
   { major: '기타', group: 'Fixed', mids: ['외화', '연금', '비상장주식', '금/실물', 'NFT', '기타'] },
 ];
 
@@ -147,46 +147,34 @@ export const CF_GROUPS = {
   지출: ['고정비', '변동비', '기타비용', '잡비용', '투자지출'],
 };
 
-// 엑셀(B.S 시트)의 항목 구조 — 금액은 0
+// 신규 사용자용 일반 자산 템플릿 (원본 엑셀의 대분류 구조, 금액은 0)
 const A = (major, mid, name, currency, rate, manager = '', note = '') => ({ major, mid, name, currency, value: 0, rate, manager, note });
 export const TEMPLATE_ASSETS = [
-  A('현금', '입출금', '생활비', 'KRW', 0, '토스', '생활비'),
-  A('현금', '파킹/CMA', '투자대기자금', 'KRW', 0.02, '토스'),
-  A('현금', '적금', '적금종합', 'KRW', 0.03, '신한은행'),
-  A('현금', '청약저축', '청약통장', 'KRW', 0.035, '신한은행'),
-  A('현금', '보증금', '보증금', 'KRW', 0, '오피스텔담보'),
-  A('현금', '비상금', 'Buffer 자금', 'KRW', 0, '토스', '비상자금'),
-  A('투자', '국내주식', '삼성증권 굴링', 'KRW', 0.15, '삼성증권', 'AI활용투자'),
-  A('투자', '국내주식', '기타증권종합', 'KRW', 0.15),
-  A('투자', '해외주식', '신한금투(소액)', 'KRW', 0.15, '신한금투'),
-  A('투자', '해외주식', '삼성증권 종합', 'KRW', 0.15, '삼성증권'),
-  A('투자', '해외주식', '토스증권', 'KRW', 0.3, '토스증권'),
-  A('투자', '펀드', '우리미국바이오', 'KRW', 0.15, '신한은행'),
-  A('투자', '펀드', '카카오 증권', 'KRW', 0.15, '카카오페이'),
-  A('투자', '펀드', '한투 베트남', 'KRW', 0.15, '신한은행'),
-  A('투자', '펀드', '삼성증권 인도', 'KRW', 0.15, '신한은행'),
-  A('투자', '펀드', '한미성장펀드', 'KRW', 0.15, '국민은행'),
-  A('가상자산', '거래소 현물', 'Coinone', 'KRW', 0.4, 'Coinone', '현물'),
-  A('가상자산', '거래소 현물', 'Bithumb', 'KRW', 0.4, 'Bithumb', '현물'),
-  A('가상자산', '스테이킹', 'Binance', 'USD', 0.4, 'Binance', '단기 Staking'),
-  A('가상자산', '스테이킹', 'NEXO', 'USD', 0.4, 'NEXO', '단기 Staking'),
-  A('가상자산', '개인지갑', 'Phantom', 'USD', 0.4, 'Phantom', '단기 Staking'),
-  A('가상자산', '스테이킹', 'Upbit', 'KRW', 0.4, 'Upbit', '단기 Staking'),
-  A('가상자산', '개인지갑', 'MetaMask', 'USD', 0.4, 'MetaMask', 'WBTC'),
-  A('채권형자산', 'P2P', '어니스트펀드', 'KRW', 0.02, '어니스트펀드'),
-  A('채권형자산', 'P2P', '피플펀드', 'KRW', 0.02, '피플펀드'),
-  A('채권형자산', 'PF', '모햇(태양광)', 'KRW', 0.12, '모햇'),
-  A('연금/보험', '연금저축', '연금저축', 'KRW', 0.1, '삼성증권'),
-  A('기타', '외화', '미국 달러', 'USD', 0, '현금보관'),
-  A('기타', '외화', '대만달러', 'TWD', 0, '현금보관'),
-  A('기타', '외화', '싱가폴달러', 'SGD', 0, '현금보관'),
-  A('기타', '외화', '유로', 'EUR', 0, '현금보관'),
+  A('현금', '입출금', '주거래 입출금 통장', 'KRW', 0, '', '생활비'),
+  A('현금', '파킹/CMA', '파킹통장 / CMA', 'KRW', 0.02, '', '투자대기자금'),
+  A('현금', '비상금', '비상금', 'KRW', 0.02, '', '월 지출 3~6개월분'),
+  A('현금', '예금', '정기예금', 'KRW', 0.03),
+  A('현금', '적금', '적금', 'KRW', 0.035),
+  A('현금', '청약저축', '주택청약종합저축', 'KRW', 0.023),
+  A('현금', '보증금', '전·월세 보증금', 'KRW', 0),
+  A('투자', '국내주식', '국내주식 계좌', 'KRW', 0.07),
+  A('투자', '해외주식', '해외주식 계좌', 'KRW', 0.08),
+  A('투자', 'ETF', 'ETF', 'KRW', 0.07),
+  A('투자', 'ISA', 'ISA 계좌', 'KRW', 0.06, '', '비과세·분리과세'),
+  A('투자', '펀드', '펀드', 'KRW', 0.05),
+  A('가상자산', '비트코인', '비트코인', 'KRW', 0.15),
+  A('가상자산', '이더리움', '이더리움', 'KRW', 0.15),
+  A('채권형자산', '국내채권', '채권', 'KRW', 0.035),
+  A('연금/보험', '연금저축', '연금저축', 'KRW', 0.06, '', '세액공제'),
+  A('연금/보험', 'IRP', 'IRP', 'KRW', 0.05, '', '세액공제'),
+  A('연금/보험', '퇴직연금', '퇴직연금(DC/DB)', 'KRW', 0.04),
+  A('기타', '외화', '미국 달러', 'USD', 0, '', '외화 현금·예금'),
 ];
 
 export const TEMPLATE_LIABILITIES = [
-  { creditor: '한국장학재단', amount: 0, maturity: '', rate: 0.017, repay: '급여', note: '' },
-  { creditor: '카카오뱅크', amount: 0, maturity: '2027-02-24', rate: 0.0355, repay: '급여', note: '' },
-  { creditor: '신한은행', amount: 0, maturity: '', rate: 0.041, repay: '급여', note: '' },
+  { creditor: '주택담보대출', amount: 0, maturity: '', rate: 0.04, repay: '원리금균등', note: '' },
+  { creditor: '신용대출', amount: 0, maturity: '', rate: 0.055, repay: '만기일시', note: '' },
+  { creditor: '학자금대출', amount: 0, maturity: '', rate: 0.017, repay: '원리금균등', note: '' },
 ];
 
 // C.F 시트 항목 구조 (단위: 만원)
@@ -440,11 +428,13 @@ export function monthlyExpense(cashflowRows) {
   return months.length ? (months.reduce((a, b) => a + b, 0) / months.length) * 10000 : 0;
 }
 
-// 최근 나이: 연도별 추이의 마지막 기록 나이 + 경과 연수
+// 최근 나이: 연도별 추이의 마지막 기록 나이 + 경과 연수 (없으면 설정의 출생연도)
+let BIRTH_YEAR = null;
+export const setBirthYear = (y) => { const n = Math.round(num(y)); BIRTH_YEAR = n > 1900 && n <= new Date().getFullYear() ? n : null; };
 export function currentAge(history) {
-  const hs = [...history].filter((r) => num(r.age)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const hs = [...(history || [])].filter((r) => num(r.age)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
   const last = hs[hs.length - 1];
-  if (!last) return null;
+  if (!last) return BIRTH_YEAR ? new Date().getFullYear() - BIRTH_YEAR : null;
   return num(last.age) + (new Date().getFullYear() - Number(String(last.date).slice(0, 4)));
 }
 
@@ -483,8 +473,16 @@ export function healthScore(ctx) {
 export function buildAlerts(ctx) {
   const out = [];
   const now = new Date();
-  const { sum, liabilities = [], assets = [], settings, cashflowRows = [], kpis = [], history = [], bases: bs = [] } = ctx;
+  const { sum, liabilities = [], assets = [], settings, cashflowRows = [], kpis = [], history = [], bases: bs = [], realestate = [] } = ctx;
   const add = (level, title, text, page) => out.push({ level, title, text, page });
+  // 부동산: LTV · 시세 갱신
+  for (const p of realestate) {
+    const m = reMetrics(p, liabilities);
+    if (m.value && m.ltv > 0.7) add('warn', `LTV 높음: ${p.name || '부동산'}`, `담보대출 ${fmtEok(m.loan)}원 / 시세 ${fmtEok(m.value)}원 = LTV ${fmtPct(m.ltv)} — 금리·시세 하락에 취약합니다`, 'realestate');
+    if (m.value && m.equity < 0) add('bad', `깡통 위험: ${p.name || '부동산'}`, `대출+보증금 ${fmtEok(m.loan + m.deposit)}원이 시세 ${fmtEok(m.value)}원을 넘습니다`, 'realestate');
+  }
+  const staleRe = realestate.filter((p) => num(p.value) && (!p.valuedAt || (now - new Date(p.valuedAt)) / 864e5 > 180));
+  if (staleRe.length) add('info', '부동산 시세 갱신 필요', `${staleRe.map((p) => p.name || '이름 없음').join(', ')} — 6개월 넘게 시세를 갱신하지 않았습니다`, 'realestate');
   // 부채
   for (const l of liabilities) {
     if (!l.maturity || !num(l.amount)) continue;
@@ -743,12 +741,15 @@ export function recommendStrategies(ctx) {
   // 14. 퇴직연금 운용
   const dc = assets.filter((a) => /퇴직연금|IRP|DC/i.test(`${a.mid} ${a.name}`) && num(a.rate) < 0.03);
   if (dc.length) add({ id: 'dc', title: '퇴직연금/IRP 를 원리금보장에서 TDF·ETF 로', why: `기대수익률 3% 미만으로 설정된 연금 자산 ${fmtEok(dc.reduce((s, a) => s + toKRW(a, fx), 0))}원.`, action: '은퇴 예정 연도의 TDF 또는 글로벌 주식 ETF 70% + 채권 30% 로 변경 (위험자산 한도 70%).', impact: dc.reduce((s, a) => s + toKRW(a, fx), 0) * 0.03, tags: ['연금', '장기'] });
+  // 15. 부동산 쏠림
+  const reAmt = sum.byMajor?.['부동산'] || 0;
+  if (reAmt / sum.total > 0.7) add({ id: 're-heavy', title: '부동산 쏠림 완화 — 금융자산 비중 늘리기', why: `총자산의 ${fmtPct(reAmt / sum.total)} 가 부동산입니다. 유동성이 낮고 지역·금리 위험이 한 곳에 몰려 있습니다.`, action: '신규 저축은 금융자산(ETF·연금계좌)으로 배분하고, 갈아타기·매도 시 리츠/채권으로 일부 분산하세요. 담보대출은 고정금리 전환·중도상환도 검토.', impact: sum.total * 0.005, tags: ['부동산', '분산'] });
   const rank = { high: 0, medium: 1, low: 2 };
   return out.sort((a, b) => rank[a.level] - rank[b.level] || b.impact - a.impact);
 }
 
 // AI 어드바이저에 보낼 요약 (개인 식별 정보 없음)
-export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kpis, kpiCtx, q, history, settings, health, alerts, strategies, transactions }) {
+export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kpis, kpiCtx, q, history, settings, health, alerts, strategies, transactions, realestate }) {
   const sum = summarize(assets, liabilities, settings);
   const eok = (v) => Math.round(num(v) / 1e4) / 1e4; // 억원 단위 소수
   const cf = cashflowSummary(cashflowRows);
@@ -765,8 +766,66 @@ export function aiContext({ basis, assets, liabilities, cashflowRows, cfYear, kp
     건강점수: health ? { 점수: health.score, 등급: health.grade, 항목: health.parts.map((p) => ({ 항목: p.label, 점수: p.score == null ? null : Math.round(p.score), 값: p.value })) } : null,
     알림: (alerts || []).map((a) => `${a.level}: ${a.title} — ${a.text}`),
     자동추천전략: (strategies || []).map((s) => `[${s.level}] ${s.title} (연 효과 ${fmtEok(s.impact)}원)`),
+    부동산: realestate?.length ? reSummary(realestate, liabilities).items.map((x) => ({ 유형: x.p.type, 용도: x.p.use, 시세_억원: eok(x.value), 취득원가_억원: eok(x.cost), 대출_억원: eok(x.loan), 보증금_억원: eok(x.deposit), LTV: +x.ltv.toFixed(3), 월세_만원: Math.round(num(x.p.rent) / 1e4) || undefined, 연환산상승률: x.cagr == null ? undefined : +x.cagr.toFixed(3) })) : undefined,
     최근소비_카테고리별_만원: transactions ? Object.fromEntries(Object.entries(txSummary(transactions, new Date().getFullYear()).byCat).map(([k, v]) => [k, Math.round(v / 1e4)])) : undefined,
   };
+}
+
+// ---------- 부동산 ----------
+export const RE_TYPES = ['아파트', '오피스텔', '빌라/다세대', '단독/다가구', '상가', '토지', '분양권/입주권', '기타'];
+export const RE_USES = ['자가 거주', '임대', '투자(보유)', '세컨드하우스', '기타'];
+// 용도·유형 → 자산 페이지의 부동산 중분류
+export const reMid = (p) => (p.type === '토지' ? '토지' : /분양권/.test(p.type || '') ? '분양권' : p.use === '임대' ? '임대용' : p.use === '자가 거주' ? '거주용' : '투자용');
+export const reShare = (p) => (p.share === '' || p.share == null ? 1 : clamp(num(p.share), 0, 1));
+
+// 물건별 지표: 지분 반영 시세·취득원가·평가손익·LTV·순지분·임대수익률·연환산 상승률
+export function reMetrics(p, liabilities = []) {
+  const share = reShare(p);
+  const value = num(p.value) * share;
+  const cost = (num(p.acqPrice) + num(p.acqCost)) * share;
+  const loanRow = p.loanId ? liabilities.find((l) => l.id === p.loanId) : null;
+  const loan = loanRow ? num(loanRow.amount) : 0;
+  const loanRate = loanRow ? num(loanRow.rate) : 0;
+  const deposit = num(p.deposit) * share;
+  const equity = value - loan - deposit;
+  const gain = cost ? value - cost : 0;
+  const gainRate = cost ? gain / cost : null;
+  const ltv = value ? loan / value : 0;
+  const annualRent = num(p.rent) * 12 * share;
+  const holdCost = num(p.holdCost) * share;
+  const interest = loan * loanRate;
+  const netIncome = annualRent - holdCost - interest;
+  const grossYield = value && annualRent ? annualRent / value : null;
+  const cashOnCash = equity > 0 && (annualRent || holdCost) ? netIncome / equity : null;
+  const t = p.acqDate ? new Date(p.acqDate).getTime() : NaN;
+  const years = Number.isFinite(t) ? (Date.now() - t) / (365.25 * 864e5) : null;
+  const cagr = cost > 0 && value > 0 && years >= 1 ? (value / cost) ** (1 / years) - 1 : null;
+  return { share, value, cost, gain, gainRate, loan, loanRate, deposit, equity, ltv, annualRent, holdCost, interest, netIncome, grossYield, cashOnCash, years, cagr, loanName: loanRow?.creditor || '' };
+}
+
+export function reSummary(list = [], liabilities = []) {
+  const m = list.map((p) => ({ p, ...reMetrics(p, liabilities) }));
+  const s = (k) => m.reduce((a, x) => a + (Number.isFinite(x[k]) ? x[k] : 0), 0);
+  const value = s('value'), cost = s('cost'), loan = s('loan'), deposit = s('deposit'), annualRent = s('annualRent'), holdCost = s('holdCost'), interest = s('interest');
+  const costed = m.filter((x) => x.cost > 0);
+  const gainBase = costed.reduce((a, x) => a + x.cost, 0);
+  const gain = costed.reduce((a, x) => a + x.gain, 0);
+  return {
+    items: m, count: m.length, value, cost, loan, deposit, equity: value - loan - deposit,
+    gain, gainRate: gainBase ? gain / gainBase : null, ltv: value ? loan / value : 0,
+    annualRent, holdCost, interest, netIncome: annualRent - holdCost - interest,
+    grossYield: value && annualRent ? annualRent / value : null,
+  };
+}
+
+// 시세 기록: 같은 날짜는 덮어쓰고 날짜순 정렬
+export function addValuation(p, value, date = today()) {
+  const list = (p.valuations || []).filter((v) => v.date !== date);
+  list.push({ date, value: num(value) });
+  list.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  p.valuations = list.slice(-120);
+  p.valuedAt = date;
+  return p;
 }
 
 export const fmtKRW = (v) => Math.round(num(v)).toLocaleString('ko-KR');
