@@ -36,10 +36,13 @@ service cloud.firestore {
     }
     match /profiles/{uid} {
       allow read: if isSelf(uid) || isAdmin();
+      // 프로필 이메일은 로그인 토큰의 이메일과 같아야 함 (관리자 화면에서 다른 사람으로 위장 방지)
       allow create: if isAdmin() || (isSelf(uid)
+        && request.resource.data.email == request.auth.token.get('email', '')
         && !request.resource.data.keys().hasAny(['disabled', 'memo', 'approvedAt', 'approvedBy'])
         && (!approvalRequired() || request.resource.data.get('pending', false) == true));
       allow update: if isAdmin() || (isSelf(uid)
+        && request.resource.data.email == request.auth.token.get('email', '')
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(adminOnlyKeys()));
       // 본인 탈퇴 시 삭제 가능 (비활성 계정은 우회 방지를 위해 불가)
       allow delete: if isAdmin() || (isSelf(uid) && resource.data.get('disabled', false) != true);
@@ -52,7 +55,11 @@ service cloud.firestore {
         && request.resource.data.email == request.auth.token.get('email', '')
         && request.resource.data.at == request.time
         && request.resource.data.keys().hasOnly(['uid', 'email', 'action', 'target', 'detail', 'at', 'subject'])
-        && request.resource.data.action is string && request.resource.data.action.size() <= 40
+        // 로그인·계정 기록은 누구나, 관리자 기록은 관리자만, 데이터 변경 기록은 쓰기 가능한 계정만
+        && (request.resource.data.action in ['login', 'signup', 'account']
+            || (request.resource.data.action == 'admin' && isAdmin())
+            || (request.resource.data.action in ['create', 'update', 'delete', 'bulk', 'import', 'export', 'settings'] && (isAdmin() || isActive())))
+        && (!('subject' in request.resource.data) || (request.resource.data.subject is string && request.resource.data.subject.size() <= 128))
         && request.resource.data.target is string && request.resource.data.target.size() <= 300
         && request.resource.data.detail is string && request.resource.data.detail.size() <= 2000;
       allow update: if false;

@@ -154,6 +154,7 @@ const fmtLogVal = (v, key) => {
   if (v == null || v === '') return '(빈칸)';
   if (key === 'loanId') return S.data.liabilities.find((l) => l.id === v)?.creditor || '(삭제된 대출)';
   if (PCT_KEYS.has(key) && typeof v === 'number') return M.fmtPct(v, 2);
+  if (['year', 'birthYear', 'age'].includes(key)) return String(v);
   if (typeof v === 'number') return Number.isInteger(v) || Math.abs(v) >= 100 ? M.fmtKRW(v) : String(+v.toFixed(4));
   if (typeof v === 'boolean') return v ? '켬' : '끔';
   if (typeof v === 'object') return '…';
@@ -163,7 +164,7 @@ const fmtLogVal = (v, key) => {
 function diffFields(before, after) {
   const out = [];
   for (const k of new Set([...Object.keys(before || {}), ...Object.keys(after || {})])) {
-    if (['id', 'order', 'valuations'].includes(k) || FIELD_LABEL[k] === null) continue;
+    if (['id', 'order', 'valuations', 'reId'].includes(k) || FIELD_LABEL[k] === null) continue;
     const a = before?.[k], b = after?.[k];
     if (JSON.stringify(a ?? null) === JSON.stringify(b ?? null)) continue;
     const label = FIELD_LABEL[k] ?? k;
@@ -211,9 +212,9 @@ function instrumentBackend(be) {
 
 // ---------- 데이터 조작 ----------
 async function guard(fn, okMsg) {
-  if (S.readOnly) { toast('읽기 전용 열람 모드입니다', 'err'); return; }
-  try { await fn(); if (okMsg) toast(okMsg); }
-  catch (e) { console.error(e); toast(`저장 실패: ${e.message || e}`, 'err'); }
+  if (S.readOnly) { toast('읽기 전용 열람 모드입니다', 'err'); return false; }
+  try { await fn(); if (okMsg) toast(okMsg); return true; }
+  catch (e) { console.error(e); toast(`저장 실패: ${e.message || e}`, 'err'); return false; }
 }
 
 // 행 순서 이동 / 복제 (order 값 교환)
@@ -232,27 +233,29 @@ async function duplicateRow(coll, row) {
   if (copy.name !== undefined) copy.name = `${copy.name} (복사)`;
   S.data[coll].push(copy);
   render();
-  await saveRow(coll, copy);
-  audit('create', `${COLL_LABEL[coll] || coll} · ${rowLabel(copy)}`, '복제');
+  if (await saveRow(coll, copy)) audit('create', `${COLL_LABEL[coll] || coll} · ${rowLabel(copy)}`, '복제');
 }
 
-function saveRow(coll, row) { if (!S.readOnly) trackChange(coll, row); return guard(() => S.be.put(coll, row.id, row)); }
+// 저장에 성공한 경우에만 변경 이력에 반영
+async function saveRow(coll, row) {
+  const ok = await guard(() => S.be.put(coll, row.id, row));
+  if (ok) trackChange(coll, row);
+  return ok;
+}
 
 async function addRow(coll, obj, focusKey) {
   const row = { ...obj, id: M.uid(), order: Date.now() };
   S.data[coll].push(row);
   if (focusKey) S.focusFid = `${row.id}:${focusKey}`;
   render();
-  await saveRow(coll, row);
-  if (!S.readOnly) audit('create', `${COLL_LABEL[coll] || coll} · ${rowLabel(row)}`, coll === 'assets' ? `기준일 ${row.basis}` : '');
+  if (await saveRow(coll, row)) audit('create', `${COLL_LABEL[coll] || coll} · ${rowLabel(row)}`, coll === 'assets' ? `기준일 ${row.basis}` : '');
 }
 
 async function removeRow(coll, row, label) {
   if (!(await confirmBox('행 삭제', `"${label || row.name || row.creditor || row.item || '이 항목'}" 을(를) 삭제할까요?`))) return;
   S.data[coll] = S.data[coll].filter((r) => r !== row);
   render();
-  await guard(() => S.be.remove(coll, row.id));
-  if (!S.readOnly) {
+  if (await guard(() => S.be.remove(coll, row.id))) {
     S.snap.delete(`${coll}:${row.id}`);
     const keyVals = ['value', 'amount', 'acqPrice', 'basis', 'year', 'date', 'major', 'mid'].filter((k) => row[k] != null && row[k] !== '').map((k) => `${FIELD_LABEL[k] || k}: ${fmtLogVal(row[k], k)}`);
     audit('delete', `${COLL_LABEL[coll] || coll} · ${rowLabel(row)}`, keyVals.join(' | '));
@@ -260,8 +263,7 @@ async function removeRow(coll, row, label) {
 }
 
 async function saveSettings() {
-  if (!S.readOnly) trackChange('settings', { ...S.settings, id: 'settings' });
-  await guard(() => S.be.saveSettings(S.settings));
+  if (await guard(() => S.be.saveSettings(S.settings))) trackChange('settings', { ...S.settings, id: 'settings' });
 }
 const snapSettings = () => S.snap.set('settings:settings', JSON.stringify({ ...S.settings, id: 'settings' }));
 
@@ -273,7 +275,9 @@ async function reload() {
   try { S.taxTemplate = (await S.be.getTaxonomyTemplate()) || null; } catch { S.taxTemplate = null; }
   const merged = M.mergeTaxonomy(S.settings.taxonomy, S.taxTemplate || M.DEFAULT_TAXONOMY);
   S.settings.taxonomy = merged.taxonomy;
-  if ((!all.settings || merged.changed) && !S.readOnly) await S.be.saveSettings(S.settings);
+  if ((!all.settings || merged.changed) && !S.readOnly) {
+    try { await S.be.saveSettings(S.settings); } catch (e) { console.warn('설정 저장 실패 (비활성/승인 대기 계정일 수 있음)', e.message || e); }
+  }
   M.setBirthYear(S.settings.birthYear);
   snapAll();
   S.snap.set('settings:settings', JSON.stringify({ ...S.settings, id: 'settings' }));
@@ -907,16 +911,18 @@ const RE_LINKS = [['KB부동산 시세', 'https://kbland.kr/'], ['국토부 실�
 const reRows = () => [...S.data.realestate].sort((a, b) => M.num(a.order) - M.num(b.order));
 
 // 부동산 → 현재 기준일 자산 / 받은 임대보증금 → 부채 반영 계획
+const latestBasis = () => M.bases(S.data.assets).at(-1) || null;
 function rePlan() {
   const props = reRows();
   const libs = S.data.liabilities;
-  const assets = S.basis ? basisAssets() : [];
+  const target = latestBasis();
+  const assets = target ? basisAssets(target) : [];
   const assetOps = [], liabOps = [];
   for (const p of props) {
     const m = M.reMetrics(p, libs);
     const want = { major: '부동산', mid: M.reMid(p), name: p.name || '부동산', currency: 'KRW', value: Math.round(m.value) };
     const a = assets.find((x) => x.reId === p.id);
-    if (S.basis && !a) assetOps.push({ kind: 'add', p, want });
+    if (target && !a) assetOps.push({ kind: 'add', p, want });
     else if (a && ['major', 'mid', 'name', 'currency', 'value'].some((k) => String(a[k]) !== String(want[k]))) assetOps.push({ kind: 'upd', p, a, want });
     const dep = Math.round(m.deposit);
     const l = libs.find((x) => x.reId === p.id);
@@ -928,20 +934,20 @@ function rePlan() {
   const ids = new Set(props.map((p) => p.id));
   for (const a of assets) if (a.reId && !ids.has(a.reId)) assetOps.push({ kind: 'del', a });
   for (const l of libs) if (l.reId && !ids.has(l.reId)) liabOps.push({ kind: 'del', l });
-  return { assetOps, liabOps, count: assetOps.length + liabOps.length };
+  return { assetOps, liabOps, count: assetOps.length + liabOps.length, target };
 }
 
 async function syncRealestate() {
-  if (!S.basis) return toast('자산 기준일이 없습니다. 자산 페이지에서 기준일을 먼저 만드세요', 'err');
   const plan = rePlan();
+  if (!plan.target) return toast('자산 기준일이 없습니다. 자산 페이지에서 기준일을 먼저 만드세요', 'err');
   if (!plan.count) return toast('이미 자산·부채에 모두 반영되어 있습니다');
   const line = (op, isAsset) => {
     const name = op.p?.name || op.a?.name || op.l?.creditor || '';
     if (isAsset) return op.kind === 'del' ? `자산 삭제: ${name} (부동산 목록에 없음)` : `자산 ${op.kind === 'add' ? '추가' : '갱신'}: ${name} → ${M.fmtKRW(op.want.value)}원 (부동산 › ${op.want.mid})`;
     return op.kind === 'del' ? `부채 삭제: ${name}` : `부채 ${op.kind === 'add' ? '추가' : '갱신'}: ${op.want.creditor} ${M.fmtKRW(op.want.amount)}원`;
   };
-  const ok = await modal({ title: `부동산 → ${S.basis} 기준일 반영`, okText: '반영', body: h('div', {},
-    h('p', { class: 'muted small' }, '시세(지분 반영)를 자산 페이지의 “부동산” 대분류로, 받은 임대보증금은 부채로 반영합니다. 담보대출은 부채 페이지의 대출과 연결만 하므로 중복되지 않습니다.'),
+  const ok = await modal({ title: `부동산 → ${plan.target} 기준일 반영`, okText: '반영', body: h('div', {},
+    h('p', { class: 'muted small' }, '가장 최근 기준일에만 반영합니다 (과거 기준일 기록은 그대로 유지). 시세(지분 반영)를 자산 페이지의 “부동산” 대분류로, 받은 임대보증금은 부채로 반영합니다. 담보대출은 부채 페이지의 대출과 연결만 하므로 중복되지 않습니다.'),
     h('ul', { class: 'plain-list' }, plan.assetOps.map((op) => h('li', { class: op.kind === 'del' ? 'down' : '' }, line(op, true))), plan.liabOps.map((op) => h('li', { class: op.kind === 'del' ? 'down' : '' }, line(op, false))))) });
   if (!ok) return;
   await guard(async () => {
@@ -950,7 +956,7 @@ async function syncRealestate() {
       if (op.kind === 'del') { aDel.push(op.a.id); continue; }
       ensureMid('부동산', op.want.mid);
       if (op.kind === 'add') {
-        const row = { ...op.want, id: M.uid(), basis: S.basis, rate: op.p.rate == null || op.p.rate === '' ? 0.03 : M.num(op.p.rate), manager: op.p.type || '', note: op.p.address || '', reId: op.p.id, order: Date.now() };
+        const row = { ...op.want, id: M.uid(), basis: plan.target, rate: op.p.rate == null || op.p.rate === '' ? 0.03 : M.num(op.p.rate), manager: op.p.type || '', note: op.p.address || '', reId: op.p.id, order: Date.now() };
         S.data.assets.push(row); aPut.push(row);
       } else { Object.assign(op.a, op.want); aPut.push(op.a); }
     }
@@ -966,7 +972,7 @@ async function syncRealestate() {
     if (lPut.length) await S.be.putMany('liabilities', lPut);
     if (lDel.length) { await S.be.removeMany('liabilities', lDel); S.data.liabilities = S.data.liabilities.filter((l) => !lDel.includes(l.id)); }
     await S.be.saveSettings(S.settings);
-    audit('bulk', '부동산 → 자산·부채 반영', `${S.basis} 기준 · 자산 ${aPut.length + aDel.length}건 · 부채 ${lPut.length + lDel.length}건`);
+    audit('bulk', '부동산 → 자산·부채 반영', `${plan.target} 기준 · 자산 ${aPut.length + aDel.length}건 · 부채 ${lPut.length + lDel.length}건`);
     render();
   }, '자산·부채에 반영했습니다');
 }
@@ -994,7 +1000,7 @@ function pageRealestate() {
   const rs = M.reSummary(all, libs);
   const mm = new Map(rs.items.map((x) => [x.p.id, x]));
   const m = (r) => mm.get(r.id) || M.reMetrics(r, libs);
-  const loanOpts = () => libs.filter((l) => !l.reId).map((l) => ({ value: l.id, label: `${l.creditor || '(이름 없음)'} · ${M.fmtEok(l.amount)}` }));
+  const loanOpts = (row) => libs.filter((l) => !l.reId && !all.some((p) => p.id !== row.id && p.loanId === l.id)).map((l) => ({ value: l.id, label: `${l.creditor || '(이름 없음)'} · ${M.fmtEok(l.amount)}` }));
   const amount = {};
   const cols = [
     { key: 'name', label: '명칭', type: 'text', w: '130px', placeholder: '예: ○○아파트' },
@@ -1047,8 +1053,8 @@ function pageRealestate() {
     toolbar(btn('+ 부동산 추가', addRealestate, 'primary'),
       btn(`자산·부채에 반영${plan?.count ? ` (${plan.count})` : ''}`, syncRealestate, '', { disabled: !all.length, title: '시세 → 자산(부동산), 받은 보증금 → 부채' }),
       h('span', { class: 'spacer' }), searchBox()),
-    plan?.count ? h('div', { class: 'banner' }, `자산 기준일 ${S.basis || '(없음)'} 과 다른 항목이 ${plan.count}건 있습니다 — “자산·부채에 반영” 을 누르면 순자산에 포함됩니다`) : null,
-    all.length && !S.basis ? h('div', { class: 'banner' }, '자산 기준일이 없어 순자산에 반영할 수 없습니다. 자산 페이지에서 기준일을 먼저 만드세요.') : null,
+    plan?.count && plan.target ? h('div', { class: 'banner' }, `최근 자산 기준일 ${plan.target} 과 다른 항목이 ${plan.count}건 있습니다 — “자산·부채에 반영” 을 누르면 순자산에 포함됩니다`) : null,
+    all.length && !plan?.target ? h('div', { class: 'banner' }, '자산 기준일이 없어 순자산에 반영할 수 없습니다. 자산 페이지에서 기준일을 먼저 만드세요.') : null,
     h('div', { class: 'kpis' },
       kpi('부동산 시세 합계', `${M.fmtEok(rs.value)}원`, `${rs.count}건 · 취득원가 ${M.fmtEok(rs.cost)}원${sum?.total ? ` · 총자산의 ${M.fmtPct((sum.byMajor['부동산'] || 0) / sum.total)}` : ''}`, 'accent'),
       kpi('순지분', `${M.fmtEok(rs.equity)}원`, `시세 − 담보대출 ${M.fmtEok(rs.loan)} − 보증금 ${M.fmtEok(rs.deposit)}`),
@@ -2156,9 +2162,13 @@ async function loadAdminData() {
 }
 async function loadAdminLogs() {
   const f = S.logFilter;
+  const key = `${f.uid}|${f.max}`;
   try { S.adminLogs = await S.be.listLogs({ uid: f.uid || undefined, max: f.max }); S.logError = null; }
   catch (e) { S.adminLogs = []; S.logError = e.message || String(e); }
+  // 불러오는 동안 사용자/건수 조건이 바뀌었으면 다시 불러오도록
+  if (`${S.logFilter.uid}|${S.logFilter.max}` !== key) S.adminLogs = null;
 }
+const localYmd = (iso) => { const d = new Date(iso); return Number.isNaN(d.getTime()) ? '' : `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 // 관리자 작업 실행 + 이력 기록
 async function adminDo(p, label, fn) {
@@ -2310,7 +2320,7 @@ function adminLogsTab() {
   const all = S.adminLogs || [];
   const q = f.q.toLowerCase();
   const rows = all.filter((l) => (!f.action || l.action === f.action)
-    && (!f.from || String(l.at).slice(0, 10) >= f.from) && (!f.to || String(l.at).slice(0, 10) <= f.to)
+    && (!f.from || localYmd(l.at) >= f.from) && (!f.to || localYmd(l.at) <= f.to)
     && (!q || `${l.email} ${l.target} ${l.detail}`.toLowerCase().includes(q)));
   const counts = rows.reduce((m, l) => { m[l.action] = (m[l.action] || 0) + 1; return m; }, {});
   const userOpts = [{ value: '', label: '전체 사용자' }, ...S.profiles.map((p) => ({ value: p.uid, label: p.email || p.uid }))];
@@ -2442,15 +2452,16 @@ async function onboarding() {
 
 async function deleteAccountFlow() {
   const u = S.user;
-  const last = new Date(u?.metadata?.lastSignInTime || 0).getTime();
-  if (Date.now() - last > 5 * 60e3) {
-    if (await modal({ title: '다시 로그인이 필요합니다', body: h('p', {}, '보안을 위해 회원 탈퇴는 로그인 후 5분 이내에만 할 수 있습니다. 로그아웃 후 다시 로그인한 뒤 진행하세요.'), okText: '로그아웃' })) S.be.signOut();
-    return;
-  }
-  const v = await ask('회원 탈퇴', [{ key: 'c', label: `확인을 위해 이메일(${u.email})을 입력하세요` }], '다음');
+  const hasPw = u?.providerData?.some((p) => p.providerId === 'password');
+  const fields = [{ key: 'c', label: `확인을 위해 이메일(${u.email})을 입력하세요` }];
+  if (hasPw) fields.push({ key: 'pw', label: '비밀번호 (본인 확인)', type: 'password' });
+  const v = await ask('회원 탈퇴', fields, '다음');
   if (!v) return;
   if (v.c.toLowerCase() !== String(u.email).toLowerCase()) return toast('이메일이 일치하지 않습니다', 'err');
   if (!(await confirmBox('회원 탈퇴', '자산·부채·부동산·현금흐름 등 모든 데이터와 계정이 삭제되며 되돌릴 수 없습니다. 먼저 엑셀로 백업하는 것을 권장합니다.', '탈퇴'))) return;
+  // 데이터를 지우기 전에 재인증 — 인증 계정 삭제 실패로 데이터만 사라지는 일을 막음
+  try { await S.be.reauth(hasPw ? v.pw : null); }
+  catch (e) { return toast(`본인 확인 실패: ${authMessage(e)}`, 'err'); }
   try {
     flushLogs();
     await S.be.log({ action: 'account', target: '회원 탈퇴', detail: u.email }).catch(() => {});
@@ -2632,6 +2643,10 @@ async function handleUpload(buffer, name = '업로드 파일') {
       h('label', {}, h('input', { type: 'radio', name: 'mode', onchange: () => { mode = 'merge'; } }),
         h('span', {}, h('b', {}, '병합'), ' — ID 가 같은 행은 수정, 새 행은 추가, 기존 행은 유지'))));
   if (!(await modal({ title: '엑셀 업로드', body, okText: '가져오기', wide: true }))) return;
+  // 부동산ID 열이 없는 예전 양식: 같은 ID 행의 부동산 연결 유지
+  for (const c of ['assets', 'liabilities']) for (const r of parsed.collections[c] || []) {
+    if (!r.reId) { const old = S.data[c].find((x) => x.id === r.id); if (old?.reId) r.reId = old.reId; }
+  }
   await guard(async () => {
     for (const [c, rows] of Object.entries(parsed.collections)) {
       if (mode === 'replace') await S.be.replace(c, rows);
@@ -2754,6 +2769,9 @@ function authMessage(e) {
     'auth/requires-recent-login': '보안을 위해 다시 로그인한 뒤 시도하세요.',
     'auth/network-request-failed': '네트워크 연결을 확인하세요.',
     'need-email': '위 칸에 이메일을 먼저 입력하세요.',
+    'auth/wrong-password': '비밀번호가 올바르지 않습니다.',
+    'auth/popup-blocked': '팝업이 차단되었습니다. 팝업을 허용한 뒤 다시 시도하세요.',
+    'auth/user-mismatch': '현재 로그인한 계정으로 본인 확인을 해 주세요.',
   };
   return m[e.code] || e.message;
 }

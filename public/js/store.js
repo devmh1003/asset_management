@@ -178,7 +178,13 @@ class FirebaseBackend {
     await this.a.updateProfile(this.auth.currentUser, { displayName: name });
     await this.updateProfile(this.uid, { name });
   }
-  // 본인 데이터 + 프로필 삭제 후 인증 계정 삭제 (최근 로그인 필요)
+  // 본인 확인: 이메일 계정은 비밀번호, 그 외는 Google 팝업
+  reauth(password) {
+    const u = this.auth.currentUser;
+    if (password != null && u.providerData.some((p) => p.providerId === 'password')) return this.a.reauthenticateWithCredential(u, this.a.EmailAuthProvider.credential(u.email, password));
+    return this.a.reauthenticateWithPopup(u, new this.a.GoogleAuthProvider());
+  }
+  // 본인 데이터 + 프로필 삭제 후 인증 계정 삭제 (reauth 직후 호출)
   async deleteAccount() {
     const u = this.auth.currentUser;
     await this.deleteUserData(u.uid);
