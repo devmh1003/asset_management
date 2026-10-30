@@ -192,14 +192,17 @@ const SORTERS = {
   portfolio: (a, b) => String(a.plan).localeCompare(String(b.plan)) || num(a.order) - num(b.order),
 };
 
-export function exportWorkbook(data, settings, filename) {
+// only: 내보낼 컬렉션 목록 (페이지별 다운로드). 없으면 전체 + 환율·분류체계·안내
+export function exportWorkbook(data, settings, filename, { only = null } = {}) {
   const wb = XLSX.utils.book_new();
   const ctx = context(data, settings);
   for (const spec of SHEETS) {
+    if (only && !only.includes(spec.col)) continue;
     const rows = [...(data[spec.col] || [])];
     rows.sort(SORTERS[spec.col] || ((a, b) => num(a.order) - num(b.order)));
     XLSX.utils.book_append_sheet(wb, sheetFrom(spec, rows, ctx), spec.name);
   }
+  if (only) { XLSX.writeFile(wb, filename); return; }
   const fx = XLSX.utils.aoa_to_sheet([['통화', '원화환율'], ...Object.entries(settings.fx)]);
   fx['!cols'] = [{ wch: 8 }, { wch: 12 }];
   XLSX.utils.book_append_sheet(wb, fx, '환율');

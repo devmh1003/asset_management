@@ -30,6 +30,8 @@ const S = {
   adminLogs: null,
   // 그리드 상태
   sort: {},           // { [tableKey]: { key, dir } }
+  pageNo: {},         // { [tableKey]: 현재 페이지(0부터) }
+  pageSize: {},       // { [tableKey]: 페이지당 행 수 (0 = 전체) }
   filter: '',
 };
 const BOOTSTRAP_ADMINS = ['devmh1003@gmail.com'];
@@ -429,6 +431,9 @@ function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky =
     }
   }
   const canReorder = reorder && !sort;
+  const all = view;
+  const pg = paginate(tableKey, all);
+  view = pg.rows;
   const cellValue = (c, r) => (c.type === 'calc' ? c.calc(r) : null);
   const onKey = (e) => {
     const t = e.target;
@@ -441,7 +446,7 @@ function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky =
     const target = next?.querySelector(`[data-fid$=":${CSS.escape(key)}"]`);
     if (target) { e.preventDefault(); S.focusFid = target.dataset.fid; setTimeout(() => { const el = document.querySelector(`[data-fid="${CSS.escape(target.dataset.fid)}"]`); el?.focus(); el?.select?.(); S.focusFid = null; }, 0); }
   };
-  return h('div', { class: 'table-wrap' },
+  const table = h('div', { class: 'table-wrap' },
     h('table', { class: `grid ${sticky ? 'sticky-first' : ''}` },
       h('thead', {}, h('tr', {}, cols.map((c) => h('th', {
         class: `${isNum(c) ? 'r' : ''} ${c.type !== 'custom' ? 'sortable' : ''}`, style: c.w ? { minWidth: c.w } : null, title: c.type !== 'custom' ? '클릭하여 정렬' : null,
@@ -455,17 +460,51 @@ function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky =
             c.type === 'calc' ? fmtCalc(c, v) : c.type === 'custom' ? c.render(r) : cellEditor(c, r, coll));
         }),
         h('td', { class: 'act' }, h('span', { class: 'row-tools' },
-          canReorder ? h('button', { class: 'icon-btn', title: '위로', disabled: i === 0, onclick: () => moveRow(coll, view, i, -1) }, '↑') : null,
-          canReorder ? h('button', { class: 'icon-btn', title: '아래로', disabled: i === view.length - 1, onclick: () => moveRow(coll, view, i, 1) }, '↓') : null,
+          canReorder ? h('button', { class: 'icon-btn', title: '위로', disabled: pg.start + i === 0, onclick: () => moveRow(coll, all, pg.start + i, -1) }, '↑') : null,
+          canReorder ? h('button', { class: 'icon-btn', title: '아래로', disabled: pg.start + i === all.length - 1, onclick: () => moveRow(coll, all, pg.start + i, 1) }, '↓') : null,
           h('button', { class: 'icon-btn', title: '복제', onclick: () => duplicateRow(coll, r) }, '⧉'),
           h('button', { class: 'icon-btn del', title: '삭제', onclick: () => removeRow(coll, r, label?.(r)) }, '✕')))))
         : h('tr', {}, h('td', { class: 'empty', colspan: cols.length + 1 }, '항목이 없습니다. “+ 항목 추가” 로 추가하세요.'))),
       foot.length ? h('tfoot', {}, foot.map((f) => h('tr', { class: f.cls || '' },
         f.cells.map((v, i) => h('td', { class: cols[i] && isNum(cols[i]) ? 'r' : '' }, v ?? '')), h('td', {})))) : null));
+  return pg.bar ? h('div', { class: 'grid-block' }, table, pg.bar) : table;
+}
+
+// 긴 표 페이지 나누기 — 표마다 현재 페이지·페이지당 행 수를 기억
+const PAGE_SIZES = [20, 50, 100, 0]; // 0 = 전체
+function paginate(key, items, def = 50) {
+  const size = S.pageSize[key] ?? def;
+  const pages = size ? Math.max(1, Math.ceil(items.length / size)) : 1;
+  let no = Math.min(S.pageNo[key] || 0, pages - 1);
+  // 새로 추가한 행처럼 포커스할 행이 다른 페이지에 있으면 그 페이지로 이동
+  const focusRow = S.focusFid?.split(':')[0];
+  if (focusRow && size) { const i = items.findIndex((r) => r.id === focusRow); if (i >= 0) no = Math.floor(i / size); }
+  S.pageNo[key] = no;
+  const start = size ? no * size : 0;
+  return { rows: size ? items.slice(start, start + size) : items, start, bar: pagerBar(key, items.length, size, no, pages, start) };
+}
+function pagerBar(key, total, size, no, pages, start) {
+  if (total <= PAGE_SIZES[0]) return null;
+  const goPage = (n) => { S.pageNo[key] = n; render(); };
+  // 1 … 4 5 [6] 7 8 … 20
+  const nums = [];
+  for (let i = 0; i < pages; i++) {
+    if (i === 0 || i === pages - 1 || Math.abs(i - no) <= 2) nums.push(i);
+    else if (nums[nums.length - 1] !== '…') nums.push('…');
+  }
+  return h('div', { class: 'pager' },
+    pages > 1 ? [
+      h('button', { class: 'btn small', disabled: no === 0, onclick: () => goPage(no - 1) }, '‹ 이전'),
+      nums.map((n) => (n === '…' ? h('span', { class: 'muted' }, '…') : h('button', { class: `btn small ${n === no ? 'primary' : ''}`, onclick: () => goPage(n) }, n + 1))),
+      h('button', { class: 'btn small', disabled: no >= pages - 1, onclick: () => goPage(no + 1) }, '다음 ›'),
+    ] : null,
+    h('span', { class: 'muted small' }, size ? `${start + 1}–${Math.min(total, start + size)} / 전체 ${total}행` : `전체 ${total}행`),
+    h('span', { class: 'spacer' }),
+    select(PAGE_SIZES.map((v) => ({ value: String(v), label: v ? `${v}행씩 보기` : '전체 보기' })), String(size), (v) => { S.pageSize[key] = Number(v); S.pageNo[key] = 0; render(); }, { placeholder: false }));
 }
 
 function searchBox() {
-  return h('label', { class: 'search' }, '🔍', h('input', { type: 'search', placeholder: '검색 (이름·분류·메모)', value: S.filter, 'data-fid': 'search', oninput: (e) => { S.filter = e.target.value; S.focusFid = 'search'; render(); } }));
+  return h('label', { class: 'search' }, '🔍', h('input', { type: 'search', placeholder: '검색 (이름·분류·메모)', value: S.filter, 'data-fid': 'search', oninput: (e) => { S.filter = e.target.value; S.pageNo = {}; S.focusFid = 'search'; render(); } }));
 }
 const matchFilter = (r, keys) => !S.filter || keys.some((k) => String(r[k] ?? '').toLowerCase().includes(S.filter.toLowerCase()));
 
@@ -1440,9 +1479,16 @@ function slider(label, key, obj, { min, max, step, fmt, pct, onchange }) {
   });
   const range = h('input', {
     type: 'range', min, max, step, value: pct ? val * 100 : val, 'data-fid': `simr:${key}`,
-    oninput: (e) => { obj[key] = pct ? Number(e.target.value) / 100 : Number(e.target.value); S.focusFid = `simr:${key}`; onchange(); },
+    onpointerdown: (e) => { S.dragEl = e.currentTarget; S.dragRender = onchange; },
+    oninput: (e) => {
+      obj[key] = pct ? Number(e.target.value) / 100 : Number(e.target.value);
+      S.focusFid = `simr:${key}`;
+      // 드래그 중: 화면 갱신을 프레임당 한 번으로 묶고, 잡고 있는 슬라이더는 교체하지 않음
+      if (S.dragEl === e.target) { if (!S.dragFrame) S.dragFrame = requestAnimationFrame(() => { S.dragFrame = 0; onchange(); }); }
+      else onchange();
+    },
   });
-  return h('div', { class: 'sim-field' }, h('div', { class: 'sim-field-head' }, h('span', {}, label), h('b', {}, display)), range, h('div', { class: 'pct-wrap' }, input, pct ? h('i', {}, '%') : h('i', {}, '원')));
+  return h('div', { class: 'sim-field' }, h('div', { class: 'sim-field-head' }, h('span', {}, label), h('b', {}, display)), range, h('div', { class: 'pct-wrap' }, input, h('i', {}, pct ? '%' : fmt ? String(fmt(0)).replace(/[\d.,\s-]/g, '') : '원')));
 }
 
 function pageSimulate() {
@@ -2137,8 +2183,10 @@ function pageAdvisor() {
 const fmtDT = (iso) => { if (!iso) return '—'; const d = new Date(iso); return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString('ko-KR', { year: '2-digit', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }); };
 const daysAgo = (iso) => (iso ? (Date.now() - new Date(iso).getTime()) / 864e5 : Infinity);
 
-function logTable(rows, { showUser = true, limit = 300 } = {}) {
+function logTable(rows, { showUser = true, limit = 300, pageKey = null } = {}) {
   if (!rows.length) return h('p', { class: 'muted' }, '조건에 맞는 기록이 없습니다.');
+  const pg = pageKey ? paginate(pageKey, rows) : null;
+  if (pg) { rows = pg.rows; limit = Infinity; }
   return h('div', {},
     h('div', { class: 'table-wrap' }, h('table', { class: 'grid compact log-table' },
       h('thead', {}, h('tr', {}, h('th', {}, '시각'), showUser ? h('th', {}, '사용자') : null, h('th', {}, '유형'), h('th', {}, '대상'), h('th', {}, '내용'))),
@@ -2148,6 +2196,7 @@ function logTable(rows, { showUser = true, limit = 300 } = {}) {
         h('td', {}, h('span', { class: `chip-s ${ACTION_TONE[l.action] || ''}` }, ACTION_LABEL[l.action] || l.action)),
         h('td', {}, l.target || ''),
         h('td', { class: 'log-detail' }, l.detail || '')))))),
+    pg?.bar || null,
     rows.length > limit ? h('p', { class: 'muted small' }, `${rows.length}건 중 최근 ${limit}건 표시 — 전체는 엑셀로 내려받으세요`) : null);
 }
 
@@ -2329,7 +2378,7 @@ function adminUsers() {
       h('label', { class: 'inline' }, '정렬', select([{ value: 'lastLogin', label: '최근 로그인' }, { value: 'createdAt', label: '가입일' }, { value: 'email', label: '이메일' }], S.userSort, (v) => { S.userSort = v; render(); }, { placeholder: false })),
       h('span', { class: 'spacer' }), searchBox(), btn('엑셀 내보내기', exportUsers, 'small')),
     card(cardHead(`계정 ${list.length}명`, 'Firebase Auth 계정은 로그인 시 자동 등록됩니다. 인증 계정 자체의 삭제는 Firebase 콘솔에서만 가능합니다.'),
-      list.length ? h('div', { class: 'admin-list' }, list.map(userRow)) : h('p', { class: 'muted' }, '조건에 맞는 계정이 없습니다.')));
+      list.length ? (() => { const pg = paginate('adminUsers', list, 50); return h('div', {}, h('div', { class: 'admin-list' }, pg.rows.map(userRow)), pg.bar); })() : h('p', { class: 'muted' }, '조건에 맞는 계정이 없습니다.')));
 }
 
 function adminLogsTab() {
@@ -2356,7 +2405,7 @@ function adminLogsTab() {
       h('div', { class: 'row' },
         all.length >= f.max && f.max < 5000 ? btn(`더 불러오기 (+500)`, () => setF({ max: f.max + 500 }, true), 'small') : null,
         btn('엑셀 다운로드', () => { exportLogs(rows, '변경이력'); audit('export', '변경 이력 엑셀', `${rows.length}건`); }, 'small', { disabled: !rows.length }))),
-      S.logError ? h('p', { class: 'down' }, `이력을 불러오지 못했습니다: ${S.logError} — Firestore 규칙이 최신인지 확인하세요.`) : logTable(rows, { limit: 500 })),
+      S.logError ? h('p', { class: 'down' }, `이력을 불러오지 못했습니다: ${S.logError} — Firestore 규칙이 최신인지 확인하세요.`) : logTable(rows, { pageKey: 'adminLogs' })),
     card(cardHead('이력 정리', 'Firestore 무료 한도(저장 1GB)를 아끼려면 오래된 이력을 주기적으로 정리하세요. 정리 작업도 이력에 남습니다.'),
       !isOwner() ? h('p', { class: 'muted small' }, '이력 삭제는 기본 관리자만 할 수 있습니다 (감사 기록 보호).') : h('div', { class: 'row' }, btn('오래된 이력 삭제…', async () => {
         const v = await ask('오래된 이력 삭제', [{ key: 'd', label: '며칠 이전 기록을 삭제할까요?', type: 'number', value: 180 }], '다음');
@@ -2527,7 +2576,7 @@ function myLogsCard() {
   }
   return card(cardHead('내 변경 이력', `최근 ${S.myLogs.length}건 · 수정은 4초 단위로 묶여 기록됩니다`,
     h('div', { class: 'row' }, btn('새로고침', () => { flushLogs(); setTimeout(load, 300); }, 'small'), btn('엑셀', () => exportLogs(S.myLogs, '내_변경이력'), 'small', { disabled: !S.myLogs.length }))),
-    logTable(S.myLogs, { showUser: false, limit: 100 }));
+    logTable(S.myLogs, { showUser: false, pageKey: 'myLogs' }));
 }
 
 // 관리자가 편집하는 추천 분류 템플릿 — 모든 사용자의 설정에 병합됨
@@ -2628,6 +2677,27 @@ function downloadExcel() {
   audit('export', '엑셀 다운로드', COLLECTIONS.map((c) => `${COLL_LABEL[c]} ${S.data[c].length}`).join(', '));
 }
 
+// 페이지별 엑셀: 그 페이지에서 편집하는 시트만 (업로드 시 해당 시트만 교체/병합)
+const PAGE_SHEETS = {
+  assets: { label: '자산', colls: ['assets'] },
+  liabilities: { label: '부채', colls: ['liabilities'] },
+  realestate: { label: '부동산', colls: ['realestate'] },
+  cashflow: { label: '현금흐름', colls: ['cashflow'] },
+  transactions: { label: '소비내역', colls: ['transactions'] },
+  kpi: { label: 'KPI·관리목표', colls: ['kpis', 'goals'] },
+  history: { label: '연도별추이', colls: ['history'] },
+  portfolio: { label: '포트폴리오', colls: ['portfolio'] },
+  simulate: { label: '시나리오', colls: ['scenarios'] },
+  advisor: { label: 'AI리포트', colls: ['reports'] },
+};
+function downloadPageExcel() {
+  const spec = PAGE_SHEETS[S.page];
+  if (!spec) return downloadExcel();
+  if (!window.XLSX) return toast('엑셀 라이브러리를 불러오지 못했습니다', 'err');
+  exportWorkbook(S.data, S.settings, stampName(`자산관리_${spec.label.replace(/·/g, '_')}`), { only: spec.colls });
+  audit('export', `엑셀 다운로드 (${spec.label})`, spec.colls.map((c) => `${COLL_LABEL[c]} ${S.data[c].length}`).join(', '));
+}
+
 function downloadTemplate() {
   if (!window.XLSX) return toast('엑셀 라이브러리를 불러오지 못했습니다', 'err');
   const data = Object.fromEntries(COLLECTIONS.map((c) => [c, templateRows(c)]));
@@ -2688,6 +2758,37 @@ const PAGE_FN = { dashboard: pageDashboard, assets: pageAssets, liabilities: pag
 
 function go(page) { S.page = page; render(); window.scrollTo(0, 0); }
 
+// 슬라이더를 끌고 있는 동안에는 그 요소를 DOM 에서 빼지 않아야 드래그가 끊기지 않는다.
+// 새로 그린 트리를 기존 트리에 이식하되, 잡고 있는 요소(keep)로 가는 경로의 노드만 유지.
+function graftKeep(oldEl, newEl, keep) {
+  const ok = (o, n) => {
+    if (o === keep) return true;
+    if (o.nodeType !== 1 || o.tagName !== n.tagName || o.childNodes.length !== n.childNodes.length) return false;
+    const i = [...o.childNodes].findIndex((c) => c === keep || c.contains(keep));
+    return i >= 0 && ok(o.childNodes[i], n.childNodes[i]);
+  };
+  if (!ok(oldEl, newEl)) return false;
+  const apply = (o, n) => {
+    if (o === keep) return;
+    o.className = n.className;
+    const olds = [...o.childNodes], news = [...n.childNodes];
+    olds.forEach((c, i) => { if (c === keep || c.contains(keep)) apply(c, news[i]); else o.replaceChild(news[i], c); });
+  };
+  apply(oldEl, newEl);
+  return true;
+}
+// 드래그가 끝나면 한 번 더 정상적으로 그림
+const endDrag = () => {
+  if (!S.dragEl) return;
+  const fn = S.dragRender;
+  S.focusFid = S.dragEl.dataset.fid;
+  S.dragEl = null; S.dragRender = null;
+  if (S.dragFrame) { cancelAnimationFrame(S.dragFrame); S.dragFrame = 0; }
+  (fn || render)();
+};
+window.addEventListener('pointerup', endDrag);
+window.addEventListener('pointercancel', endDrag);
+
 function render() {
   const main = $('#main');
   const fid = S.focusFid || document.activeElement?.dataset?.fid;
@@ -2709,10 +2810,14 @@ function render() {
     S.profile?.disabled && !S.viewing ? h('div', { class: 'banner bad' }, '이 계정은 관리자에 의해 비활성화되어 저장이 제한됩니다. 문의는 관리자에게 하세요.') : null,
     S.viewing ? h('div', { class: 'banner' }, `★ 관리자 열람 모드 — ${S.viewing.email} 의 데이터 (읽기 전용)`, h('span', { class: 'spacer' }), btn('열람 종료', exitView, 'small')) : null,
   ].filter(Boolean);
-  main.replaceChildren(tops.length ? h('div', { class: 'stack' }, ...tops, page) : page);
+  const root = tops.length ? h('div', { class: 'stack' }, ...tops, page) : page;
+  const dragging = S.dragEl?.isConnected && main.firstChild && graftKeep(main.firstChild, root, S.dragEl);
+  if (!dragging) main.replaceChildren(root);
+  const pageBtn = $('#btn-down-page');
+  if (pageBtn) { const spec = PAGE_SHEETS[S.page]; pageBtn.hidden = !spec; if (spec) pageBtn.title = `${spec.label} 시트만 엑셀로 내려받기 (같은 양식으로 다시 업로드 가능)`; }
   main.querySelectorAll('.table-wrap').forEach((el, i) => { if (scrolls[i]) el.scrollLeft = scrolls[i]; });
   S.pendingCharts.forEach((fn) => fn());
-  if (fid) {
+  if (fid && !dragging) {
     const el = main.querySelector(`[data-fid="${CSS.escape(fid)}"]`);
     if (el) { el.focus({ preventScroll: true }); if (S.focusFid) el.select?.(); }
   }
@@ -2725,6 +2830,7 @@ function buildShell() {
   $('#mode').textContent = S.be.kind === 'firebase' ? (S.admin ? 'Firebase · 관리자' : 'Firebase') : '로컬 모드';
   $('#mode').className = `badge ${S.be.kind === 'firebase' ? 'ok' : 'warn'}`;
   $('#btn-down').onclick = downloadExcel;
+  $('#btn-down-page').onclick = downloadPageExcel;
   $('#btn-up').onclick = pickUpload;
   $('#btn-theme').onclick = toggleTheme;
   $('#user').replaceChildren(S.user
