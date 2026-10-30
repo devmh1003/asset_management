@@ -32,6 +32,8 @@ const S = {
   sort: {},           // { [tableKey]: { key, dir } }
   pageNo: {},         // { [tableKey]: 현재 페이지(0부터) }
   pageSize: {},       // { [tableKey]: 페이지당 행 수 (0 = 전체) }
+  sel: {},            // { [tableKey]: Set(선택한 행 id) }
+  selAnchor: {},      // { [tableKey]: Shift 범위 선택 기준 행 id }
   filter: '',
 };
 const BOOTSTRAP_ADMINS = ['devmh1003@gmail.com'];
@@ -267,6 +269,23 @@ async function removeRow(coll, row, label) {
   }
 }
 
+// 체크한 행 일괄 삭제
+async function removeRows(coll, tableKey, ids) {
+  const set = new Set(ids);
+  const rows = S.data[coll].filter((r) => set.has(r.id));
+  if (!rows.length) return;
+  const names = rows.slice(0, 5).map(rowLabel).join(', ') + (rows.length > 5 ? ` 외 ${rows.length - 5}건` : '');
+  if (!(await confirmBox('선택 삭제', `${rows.length}개 항목을 삭제할까요? (${names}) 되돌릴 수 없습니다.`, `${rows.length}개 삭제`))) return;
+  if (await guard(() => S.be.removeMany(coll, rows.map((r) => r.id)))) {
+    S.data[coll] = S.data[coll].filter((r) => !set.has(r.id));
+    for (const r of rows) S.snap.delete(`${coll}:${r.id}`);
+    S.sel[tableKey]?.clear();
+    audit('delete', `${COLL_LABEL[coll] || coll} ${rows.length}건 일괄 삭제`, names);
+    toast(`${rows.length}개 항목을 삭제했습니다`);
+    render();
+  }
+}
+
 async function saveSettings() {
   if (await guard(() => S.be.saveSettings(S.settings))) trackChange('settings', { ...S.settings, id: 'settings' });
 }
@@ -374,20 +393,35 @@ function fmtCalc(c, v) {
   return M.fmtKRW(v);
 }
 
+// 숫자 칸 입력값 → 저장할 값 (빈칸·nullable·퍼센트·자연어 금액 처리)
+function parseCellValue(c, val) {
+  if (c.type === 'num' && c.amount) return val === '' ? 0 : M.parseAmount(val).value;
+  if (c.type === 'num') return val === '' ? (c.nullable ? null : 0) : M.num(val);
+  if (c.type === 'pct') return val === '' ? (c.nullable ? null : 0) : M.num(val) / 100;
+  return val;
+}
+// 입력하는 동안에도 합계·평균·비중이 바로 바뀌도록: 값은 메모리에만 반영하고(저장은 Enter/칸 이동 시)
+// 입력 중인 칸은 그대로 둔 채 나머지를 다시 그림
+function liveEdit(c, row, el) {
+  if (S.readOnly) return;
+  const v = parseCellValue(c, el.value.trim());
+  if (v != null && !Number.isFinite(v)) return;
+  if (c.set) c.set(row, v); else row[c.key] = v;
+  if (!S.liveFrame) S.liveFrame = requestAnimationFrame(() => { S.liveFrame = 0; if (document.activeElement === el) render({ keep: el }); });
+}
+
 function cellEditor(c, row, coll) {
   const fid = `${row.id}:${c.key}`;
   const raw = c.get ? c.get(row) : row[c.key];
   const commit = (val) => {
     // 열람 모드: 화면 값만 바뀌고 저장은 안 되는 혼란을 막기 위해 원래 값으로 되돌림
     if (S.readOnly) { toast(readOnlyMsg(), 'err'); return setTimeout(render, 0); }
-    let v = val;
+    const v = parseCellValue(c, val);
     if (c.type === 'num' && c.amount) {
       // "1.2억", "500만", "$1,000" 등 자연어 금액 파싱 + 통화 힌트
       const p = M.parseAmount(val);
-      v = val === '' ? 0 : p.value;
       if (p.currency && c.amount.currencyKey && row[c.amount.currencyKey] !== p.currency) { row[c.amount.currencyKey] = p.currency; toast(`통화를 ${p.currency} 로 설정했습니다`); }
-    } else if (c.type === 'num') v = val === '' ? (c.nullable ? null : 0) : M.num(val);
-    if (c.type === 'pct') v = val === '' ? (c.nullable ? null : 0) : M.num(val) / 100;
+    }
     if (c.set) c.set(row, v); else row[c.key] = v;
     c.after?.(row);
     saveRow(coll, row);
@@ -408,13 +442,39 @@ function cellEditor(c, row, coll) {
     class: `${c.type} ${neg ? 'neg' : ''}`,
     inputmode: c.type === 'num' || c.type === 'pct' ? 'decimal' : null,
     onchange: (e) => commit(e.target.value),
+    oninput: c.type === 'num' || c.type === 'pct' ? (e) => liveEdit(c, row, e.target) : null,
     onkeydown: (e) => { if (e.key === 'Enter') e.target.blur(); },
   });
   return c.type === 'pct' ? h('span', { class: 'pct-wrap' }, input, h('i', {}, '%')) : input;
 }
 
 // 엑셀처럼: 헤더 클릭 정렬, Enter/↑↓ 로 행 이동, 행 순서 이동·복제, 대분류 색상, 비중 데이터바
-function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky = true, tableKey = coll, reorder = true }) {
+// 열별 자동 집계: 금액·숫자 = 합계+평균, 퍼센트 = 평균. 통화가 섞이는 열·나이·기간 등은 합계 제외
+function aggOf(c) {
+  if (c.agg) return c.agg;
+  if (c.type === 'pct' || (c.type === 'calc' && c.fmt === 'pct')) return ['avg'];
+  if (c.type === 'num') return c.amount?.currencyKey ? [] : ['age', 'years', 'year', 'area'].includes(c.key) ? ['avg'] : ['sum', 'avg'];
+  if (c.type === 'calc' && (!c.fmt || c.fmt === 'num')) return ['sum', 'avg'];
+  return [];
+}
+function colStats(cols, rows) {
+  return cols.map((c) => {
+    const ag = aggOf(c);
+    if (!ag.length) return null;
+    const vals = rows.map((r) => (c.type === 'calc' ? c.calc(r) : c.get ? c.get(r) : r[c.key]))
+      .filter((v) => v !== '' && v != null && Number.isFinite(Number(v))).map(Number);
+    const sum = vals.reduce((a, b) => a + b, 0);
+    return { ag, sum, avg: vals.length ? sum / vals.length : null };
+  });
+}
+function fmtStat(c, v) {
+  if (v == null) return '';
+  if (c.type === 'pct') return M.fmtPct(v, 2);
+  if (c.type === 'calc') return fmtCalc(c, v);
+  return c.amount || Number.isInteger(v) || Math.abs(v) >= 100 ? M.fmtKRW(v) : M.fmtNum(v, 2);
+}
+
+function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky = true, tableKey = coll, reorder = true, stats = true }) {
   const isNum = (c) => ['num', 'pct'].includes(c.type) || (c.type === 'calc');
   const sort = S.sort[tableKey];
   let view = rows;
@@ -434,6 +494,45 @@ function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky =
   const all = view;
   const pg = paginate(tableKey, all);
   view = pg.rows;
+  // 체크 선택: 지금 보이는(검색 결과) 행만 선택 유지
+  const sel = (S.sel[tableKey] ||= new Set());
+  const visibleIds = new Set(all.map((r) => r.id));
+  for (const id of sel) if (!visibleIds.has(id)) sel.delete(id);
+  const pageAllSel = view.length > 0 && view.every((r) => sel.has(r.id));
+  const pageSomeSel = view.some((r) => sel.has(r.id));
+  const toggleRow = (r, e) => {
+    const on = e.target.checked;
+    const anchor = S.selAnchor[tableKey];
+    const ai = anchor ? all.findIndex((x) => x.id === anchor) : -1;
+    const bi = all.findIndex((x) => x.id === r.id);
+    // Shift+클릭: 기준 행부터 이 행까지 범위 선택
+    const targets = e.shiftKey && ai >= 0 ? all.slice(Math.min(ai, bi), Math.max(ai, bi) + 1) : [r];
+    for (const t of targets) on ? sel.add(t.id) : sel.delete(t.id);
+    S.selAnchor[tableKey] = r.id;
+    render();
+  };
+  const headBox = h('input', { type: 'checkbox', checked: pageAllSel, title: '이 페이지 전체 선택', 'aria-label': '이 페이지 전체 선택',
+    onclick: (e) => { for (const r of view) e.target.checked ? sel.add(r.id) : sel.delete(r.id); render(); } });
+  headBox.indeterminate = pageSomeSel && !pageAllSel;
+  const selRows = sel.size ? all.filter((r) => sel.has(r.id)) : [];
+  // 자동 합계·평균 (전체 행 기준, 입력하는 즉시 갱신) + 선택한 행의 합계·평균
+  const hasSumFoot = foot.some((f) => String(f.cells[0] ?? '').includes('합계'));
+  const labelAt = cols[0] && !aggOf(cols[0]).length ? 0 : -1;
+  const statRow = (title, st, kind, cls) => {
+    if (!st.some((x) => x?.ag.includes(kind))) return null;
+    return { cls, cells: cols.map((c, i) => (i === labelAt ? title : st[i]?.ag.includes(kind) ? fmtStat(c, st[i][kind]) : '')), lead: labelAt < 0 ? title : '' };
+  };
+  const autoFoot = [];
+  if (stats && all.length) {
+    const st = colStats(cols, all);
+    if (!hasSumFoot) autoFoot.push(statRow('합계', st, 'sum', 'stat-row'));
+    autoFoot.push(statRow(`평균 (${all.length}행)`, st, 'avg', 'stat-row'));
+  }
+  if (selRows.length) {
+    const st = colStats(cols, selRows);
+    autoFoot.push(statRow(`선택 합계 (${selRows.length}행)`, st, 'sum', 'sel-stat'), statRow('선택 평균', st, 'avg', 'sel-stat'));
+  }
+  const footRows = [...foot, ...autoFoot.filter(Boolean)];
   const cellValue = (c, r) => (c.type === 'calc' ? c.calc(r) : null);
   const onKey = (e) => {
     const t = e.target;
@@ -448,11 +547,12 @@ function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky =
   };
   const table = h('div', { class: 'table-wrap' },
     h('table', { class: `grid ${sticky ? 'sticky-first' : ''}` },
-      h('thead', {}, h('tr', {}, cols.map((c) => h('th', {
+      h('thead', {}, h('tr', {}, h('th', { class: 'sel' }, headBox), cols.map((c) => h('th', {
         class: `${isNum(c) ? 'r' : ''} ${c.type !== 'custom' ? 'sortable' : ''}`, style: c.w ? { minWidth: c.w } : null, title: c.type !== 'custom' ? '클릭하여 정렬' : null,
         onclick: c.type === 'custom' ? null : () => { const cur = S.sort[tableKey]; S.sort[tableKey] = cur?.key === c.key ? (cur.dir === 'asc' ? { key: c.key, dir: 'desc' } : null) : { key: c.key, dir: 'asc' }; render(); },
       }, c.label, sort?.key === c.key ? h('span', { class: 'sort-ind' }, sort.dir === 'asc' ? '▲' : '▼') : null)), h('th', { class: 'act' }))),
-      h('tbody', { onkeydown: onKey }, view.length ? view.map((r, i) => h('tr', { class: rowClass?.(r) || '', style: rowColor ? { '--row-c': rowColor(r) } : null },
+      h('tbody', { onkeydown: onKey }, view.length ? view.map((r, i) => h('tr', { class: `${rowClass?.(r) || ''} ${sel.has(r.id) ? 'selected' : ''}`, style: rowColor ? { '--row-c': rowColor(r) } : null },
+        h('td', { class: 'sel' }, h('input', { type: 'checkbox', checked: sel.has(r.id), 'aria-label': '행 선택', title: 'Shift+클릭: 범위 선택', onclick: (e) => toggleRow(r, e) })),
         cols.map((c) => {
           const v = cellValue(c, r);
           const databar = c.databar && typeof v === 'number' && v > 0;
@@ -464,10 +564,17 @@ function grid({ cols, rows, coll, foot = [], label, rowClass, rowColor, sticky =
           canReorder ? h('button', { class: 'icon-btn', title: '아래로', disabled: pg.start + i === all.length - 1, onclick: () => moveRow(coll, all, pg.start + i, 1) }, '↓') : null,
           h('button', { class: 'icon-btn', title: '복제', onclick: () => duplicateRow(coll, r) }, '⧉'),
           h('button', { class: 'icon-btn del', title: '삭제', onclick: () => removeRow(coll, r, label?.(r)) }, '✕')))))
-        : h('tr', {}, h('td', { class: 'empty', colspan: cols.length + 1 }, '항목이 없습니다. “+ 항목 추가” 로 추가하세요.'))),
-      foot.length ? h('tfoot', {}, foot.map((f) => h('tr', { class: f.cls || '' },
+        : h('tr', {}, h('td', { class: 'empty', colspan: cols.length + 2 }, '항목이 없습니다. “+ 항목 추가” 로 추가하세요.'))),
+      footRows.length ? h('tfoot', {}, footRows.map((f) => h('tr', { class: f.cls || '' },
+        h('td', { class: 'sel', title: f.lead || null }, f.lead ? 'Σ' : ''),
         f.cells.map((v, i) => h('td', { class: cols[i] && isNum(cols[i]) ? 'r' : '' }, v ?? '')), h('td', {})))) : null));
-  return pg.bar ? h('div', { class: 'grid-block' }, table, pg.bar) : table;
+  const selBar = sel.size ? h('div', { class: 'sel-bar' },
+    h('b', {}, `${sel.size}행 선택`),
+    all.length > sel.size ? btn(`검색된 ${all.length}행 모두 선택`, () => { for (const r of all) sel.add(r.id); render(); }, 'small link') : null,
+    h('span', { class: 'spacer' }),
+    btn('선택 해제', () => { sel.clear(); render(); }, 'small'),
+    btn(`🗑 선택 삭제 (${sel.size})`, () => removeRows(coll, tableKey, [...sel]), 'small danger')) : null;
+  return selBar || pg.bar ? h('div', { class: 'grid-block' }, selBar, table, pg.bar) : table;
 }
 
 // 긴 표 페이지 나누기 — 표마다 현재 페이지·페이지당 행 수를 기억
@@ -1158,7 +1265,7 @@ function pageCashflow() {
       kpi('연간 순이익', `${M.fmtNum(tot(cf.net))}만원`, `저축률 ${tot(cf.inc) ? M.fmtPct(tot(cf.net) / tot(cf.inc)) : '—'}`, 'accent'),
       bud.length ? kpi(`${monthIdx + 1}월 예산 대비`, `${M.fmtNum(budActual)} / ${M.fmtNum(budTotal)}만원`, bud.filter((b) => b.ratio > 1).length ? `초과 ${bud.filter((b) => b.ratio > 1).map((b) => b.name).join(', ')}` : '모든 항목 예산 내') : kpi('월평균 지출', `${M.fmtNum(tot(cf.out) / 12, 1)}만원`, '지출 행에 월예산을 넣으면 예산 대비 분석')),
     card(`${S.cfYear} Cash Flow`, grid({
-      cols, rows, coll: 'cashflow', label: (r) => r.name,
+      cols, rows, coll: 'cashflow', label: (r) => r.name, stats: false,
       rowClass: (r) => (r.type === '수입' ? 'inc' : 'out'),
       foot: [line('수입 합계 (A)', cf.inc), line('지출 합계 (B)', cf.out), line('Net Income (A-B)', cf.net, 'total'), { cls: 'muted-row', cells: ['누적 순이익', '', '', '', ...cf.cum.map((v) => M.fmtNum(v)), M.fmtNum(cf.cum[11]), ''] }],
     })),
@@ -1479,7 +1586,7 @@ function slider(label, key, obj, { min, max, step, fmt, pct, onchange }) {
   });
   const range = h('input', {
     type: 'range', min, max, step, value: pct ? val * 100 : val, 'data-fid': `simr:${key}`,
-    onpointerdown: (e) => { S.dragEl = e.currentTarget; S.dragRender = onchange; },
+    onpointerdown: (e) => { if (S.dragFrame) { cancelAnimationFrame(S.dragFrame); S.dragFrame = 0; } S.dragEl = e.currentTarget; S.dragRender = onchange; },
     oninput: (e) => {
       obj[key] = pct ? Number(e.target.value) / 100 : Number(e.target.value);
       S.focusFid = `simr:${key}`;
@@ -1857,7 +1964,7 @@ function pageTransactions() {
         ] },
         options: { maintainAspectRatio: false, animation: false, interaction: { mode: 'index', intersect: false }, scales: { x: { grid: { display: false }, ticks: { maxTicksLimit: 8 } }, y: { ticks: { callback: (v) => M.fmtEok(v) }, grid: { color: cssVar('--line') } } }, plugins: { legend: { position: 'bottom', labels: { boxWidth: 10, usePointStyle: true } }, tooltip: { callbacks: { label: (c) => ` ${c.dataset.label}: ${M.fmtKRW(c.raw)}원` } } } },
       }, '240px'))),
-    card(null, grid({ cols, rows, coll: 'transactions', label: (r) => r.desc, rowClass: (r) => (r.type === '수입' ? 'inc' : ''), reorder: false, foot: [{ cls: 'total', cells: ['합계', '', '', '', M.fmtKRW(rows.filter((r) => r.type !== '수입').reduce((s, r) => s + Math.abs(M.num(r.amount)), 0)), '', ''] }] }),
+    card(null, grid({ cols, rows, coll: 'transactions', label: (r) => r.desc, stats: false, rowClass: (r) => (r.type === '수입' ? 'inc' : ''), reorder: false, foot: [{ cls: 'total', cells: ['합계', '', '', '', M.fmtKRW(rows.filter((r) => r.type !== '수입').reduce((s, r) => s + Math.abs(M.num(r.amount)), 0)), '', ''] }] }),
       S.filter ? h('p', { class: 'muted small' }, `검색 결과 ${rows.length} / ${all.length} 건`) : null),
     card(cardHead(`${year}년 월별 지출 추이`, '소비내역 합계 (원)'), chart('c-txyear', {
       type: 'bar',
@@ -2789,11 +2896,11 @@ const endDrag = () => {
 window.addEventListener('pointerup', endDrag);
 window.addEventListener('pointercancel', endDrag);
 
-function render() {
+function render({ keep = null } = {}) {
   const main = $('#main');
   const fid = S.focusFid || document.activeElement?.dataset?.fid;
   const scrolls = [...main.querySelectorAll('.table-wrap')].map((el) => el.scrollLeft);
-  S.charts.forEach((c) => c.destroy());
+  const prevCharts = S.charts;
   S.charts = [];
   S.pendingCharts = [];
   if (window.Chart) {
@@ -2811,11 +2918,15 @@ function render() {
     S.viewing ? h('div', { class: 'banner' }, `★ 관리자 열람 모드 — ${S.viewing.email} 의 데이터 (읽기 전용)`, h('span', { class: 'spacer' }), btn('열람 종료', exitView, 'small')) : null,
   ].filter(Boolean);
   const root = tops.length ? h('div', { class: 'stack' }, ...tops, page) : page;
-  const dragging = S.dragEl?.isConnected && main.firstChild && graftKeep(main.firstChild, root, S.dragEl);
+  const hold = keep || (S.dragEl?.isConnected ? S.dragEl : null);
+  const dragging = !!hold && !!main.firstChild && graftKeep(main.firstChild, root, hold);
+  // 입력 중 실시간 갱신인데 화면 구조가 달라졌으면(예: 그 열로 정렬 중) 이번 갱신은 건너뜀 — 입력 칸을 지키기 위해
+  if (keep && !dragging) { S.charts = prevCharts; S.pendingCharts = []; return; }
+  prevCharts.forEach((c) => c.destroy());
   if (!dragging) main.replaceChildren(root);
   const pageBtn = $('#btn-down-page');
   if (pageBtn) { const spec = PAGE_SHEETS[S.page]; pageBtn.hidden = !spec; if (spec) pageBtn.title = `${spec.label} 시트만 엑셀로 내려받기 (같은 양식으로 다시 업로드 가능)`; }
-  main.querySelectorAll('.table-wrap').forEach((el, i) => { if (scrolls[i]) el.scrollLeft = scrolls[i]; });
+  if (!dragging) main.querySelectorAll('.table-wrap').forEach((el, i) => { if (scrolls[i]) el.scrollLeft = scrolls[i]; });
   S.pendingCharts.forEach((fn) => fn());
   if (fid && !dragging) {
     const el = main.querySelector(`[data-fid="${CSS.escape(fid)}"]`);

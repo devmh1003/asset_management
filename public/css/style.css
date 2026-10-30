@@ -377,7 +377,7 @@ textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--acce
 
 /* ---------- print ---------- */
 @media print {
-  .side, .top-actions, .toolbar, .toasts, .icon-btn, td.act, th.act { display: none !important; }
+  .side, .top-actions, .toolbar, .toasts, .icon-btn, td.act, th.act, td.sel, th.sel, .sel-bar, .pager { display: none !important; }
   .app { display: block; }
   body { background: #fff; color: #000; font-size: 11px; }
   main { padding: 0; }
@@ -438,3 +438,16 @@ textarea:focus { outline: 2px solid var(--accent-soft); border-color: var(--acce
 
 /* 슬라이더: 넓은 터치 영역과 부드러운 이동 */
 .sim-field input[type=range] { width: 100%; height: 28px; margin: 2px 0; cursor: pointer; touch-action: none; accent-color: var(--accent); padding: 0; border: 0; background: none; }
+
+/* 행 체크 선택 · 일괄 삭제 · 자동 합계/평균 */
+table.grid th.sel, table.grid td.sel { width: 34px; min-width: 34px; max-width: 34px; padding: 0 8px; text-align: center; }
+table.grid th.sel input, table.grid td.sel input { width: 15px; height: 15px; margin: 0; vertical-align: middle; cursor: pointer; accent-color: var(--accent); }
+table.grid.sticky-first th.sel + th, table.grid.sticky-first td.sel + td { position: sticky; left: 34px; z-index: 1; background: var(--panel); }
+table.grid.sticky-first th.sel + th { z-index: 3; background: var(--panel-2); }
+table.grid tfoot td.sel + td { position: sticky; left: 34px; background: var(--panel-2); }
+table.grid tbody tr.selected, table.grid tbody tr.selected td,
+table.grid.sticky-first tbody tr.selected td:first-child, table.grid.sticky-first tbody tr.selected td.sel + td { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); }
+table.grid tfoot tr.stat-row td { font-weight: 600; color: var(--muted); }
+table.grid tfoot tr.stat-row:first-of-type td, table.grid tfoot tr.sel-stat:first-of-type td { border-top: 1px solid var(--line); }
+table.grid tfoot tr.sel-stat td, table.grid tfoot tr.sel-stat td.sel + td { background: color-mix(in srgb, var(--accent) 10%, var(--panel-2)); color: var(--accent-2); }
+.sel-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-2); }
