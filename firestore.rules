@@ -8,6 +8,11 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/admins/$(request.auth.token.email))
       );
     }
+    // 기본 관리자(소유자): 이력 삭제처럼 감사 기록을 지우는 작업은 소유자만
+    function isOwner() {
+      return request.auth != null && request.auth.token.email_verified == true
+        && request.auth.token.email in ['devmh1003@gmail.com'];
+    }
     function isSelf(uid) { return request.auth != null && request.auth.uid == uid; }
     function profilePath(uid) { return /databases/$(database)/documents/profiles/$(uid); }
     function configPath() { return /databases/$(database)/documents/meta/appConfig; }
@@ -24,6 +29,23 @@ service cloud.firestore {
     }
     // 사용자가 스스로 바꿀 수 없는 프로필 필드
     function adminOnlyKeys() { return ['disabled', 'pending', 'memo', 'approvedAt', 'approvedBy']; }
+    // 프로필에 저장할 수 있는 필드 (그 외 임의 필드 차단)
+    function profileKeys() {
+      return ['email', 'emailVerified', 'name', 'photo', 'provider', 'createdAt', 'consentAt', 'lastLogin', 'loginCount',
+              'disabled', 'pending', 'memo', 'approvedAt', 'approvedBy'];
+    }
+    // 본인이 쓰는 프로필 값 검증: 이메일은 토큰과 같아야 하고, 이메일 인증 여부는 토큰이 인증된 경우에만 true
+    function validSelfProfile() {
+      return request.resource.data.email == request.auth.token.get('email', '')
+        && (request.resource.data.get('emailVerified', false) != true || request.auth.token.email_verified == true)
+        && request.resource.data.keys().hasOnly(profileKeys())
+        && request.resource.data.get('name', '') is string && request.resource.data.get('name', '').size() <= 100
+        && request.resource.data.get('photo', '') is string && request.resource.data.get('photo', '').size() <= 1000;
+    }
+    // 사용자 데이터 컬렉션 (store.js COLLECTIONS + meta/settings)
+    function userCollections() {
+      return ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports', 'transactions', 'realestate', 'meta'];
+    }
 
     match /admins/{email} {
       allow read: if request.auth != null && (request.auth.token.email == email || isAdmin());
@@ -37,17 +59,19 @@ service cloud.firestore {
     match /profiles/{uid} {
       allow read: if isSelf(uid) || isAdmin();
       // 프로필 이메일은 로그인 토큰의 이메일과 같아야 함 (관리자 화면에서 다른 사람으로 위장 방지)
-      allow create: if isAdmin() || (isSelf(uid)
-        && request.resource.data.email == request.auth.token.get('email', '')
+      allow create: if isAdmin() || (isSelf(uid) && validSelfProfile()
         && !request.resource.data.keys().hasAny(['disabled', 'memo', 'approvedAt', 'approvedBy'])
         && (!approvalRequired() || request.resource.data.get('pending', false) == true));
-      allow update: if isAdmin() || (isSelf(uid)
-        && request.resource.data.email == request.auth.token.get('email', '')
+      allow update: if isAdmin() || (isSelf(uid) && validSelfProfile()
         && !request.resource.data.diff(resource.data).affectedKeys().hasAny(adminOnlyKeys()));
       // 본인 탈퇴 시 삭제 가능 (비활성 계정은 우회 방지를 위해 불가)
       allow delete: if isAdmin() || (isSelf(uid) && resource.data.get('disabled', false) != true);
     }
-    // 변경 이력: 본인 이름·서버 시각으로만 추가, 수정 불가, 삭제는 관리자만
+    // 관리자 메모: 대상 사용자에게 보이지 않도록 프로필과 분리
+    match /adminNotes/{uid} {
+      allow read, write: if isAdmin();
+    }
+    // 변경 이력: 본인 이름·서버 시각으로만 추가, 수정 불가, 삭제는 기본 관리자(소유자)만
     match /auditLogs/{logId} {
       allow read: if isAdmin() || (request.auth != null && resource.data.uid == request.auth.uid);
       allow create: if request.auth != null
@@ -63,12 +87,15 @@ service cloud.firestore {
         && request.resource.data.target is string && request.resource.data.target.size() <= 300
         && request.resource.data.detail is string && request.resource.data.detail.size() <= 2000;
       allow update: if false;
-      allow delete: if isAdmin();
+      allow delete: if isOwner();
     }
-    // 각 사용자는 자신의 users/{uid} 하위 문서만 읽고 쓸 수 있음. 관리자는 열람·정리 가능
-    match /users/{uid}/{document=**} {
+    // 각 사용자는 자신의 users/{uid}/{컬렉션}/{문서} 만 읽고 쓸 수 있음. 관리자는 열람·정리 가능
+    // 정해진 컬렉션 외의 경로·하위 중첩 문서는 쓰기 불가 (무료 한도 남용 방지)
+    match /users/{uid}/{coll}/{docId} {
       allow read: if isSelf(uid) || isAdmin();
-      allow write: if (isSelf(uid) && isActive()) || isAdmin();
+      allow write: if coll in userCollections()
+        && (coll != 'meta' || docId == 'settings')
+        && ((isSelf(uid) && isActive()) || isAdmin());
     }
   }
 }

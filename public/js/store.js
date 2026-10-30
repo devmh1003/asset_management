@@ -71,6 +71,12 @@ class FirebaseBackend {
     const app = appMod.initializeApp(firebaseConfig);
     this.auth = authMod.getAuth(app);
     this.db = fs.getFirestore(app);
+    // 개발용: localhost 에서 ?emu=1 이면 로컬 에뮬레이터에 연결 (배포 사이트에서는 무시)
+    if (['localhost', '127.0.0.1'].includes(location.hostname) && new URLSearchParams(location.search).has('emu')) {
+      authMod.connectAuthEmulator(this.auth, 'http://127.0.0.1:9199', { disableWarnings: true });
+      fs.connectFirestoreEmulator(this.db, '127.0.0.1', 8089);
+      this.emulator = true;
+    }
   }
   onAuth(cb) {
     return this.a.onAuthStateChanged(this.auth, (user) => { this.uid = user ? user.uid : null; cb(user); });
@@ -89,7 +95,7 @@ class FirebaseBackend {
     const ref = this.fs.doc(this.db, 'profiles', user.uid);
     const snap = await this.fs.getDoc(ref);
     const now = new Date().toISOString();
-    const common = { email: user.email || '', photo: user.photoURL || '', lastLogin: now, provider: user.providerData?.[0]?.providerId || '' };
+    const common = { email: user.email || '', emailVerified: !!user.emailVerified, photo: user.photoURL || '', lastLogin: now, provider: user.providerData?.[0]?.providerId || '' };
     if (!snap.exists()) {
       const cfg = await this.getAppConfig();
       const data = { ...common, name: user.displayName || '', createdAt: now, consentAt: now, loginCount: 1 };
@@ -117,8 +123,17 @@ class FirebaseBackend {
   addAdmin(email, by) { return this.fs.setDoc(this.fs.doc(this.db, 'admins', email), { addedAt: new Date().toISOString(), by }); }
   removeAdmin(email) { return this.fs.deleteDoc(this.fs.doc(this.db, 'admins', email)); }
   async listProfiles() {
-    const snap = await this.fs.getDocs(this.fs.collection(this.db, 'profiles'));
-    return snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
+    const [snap, notes] = await Promise.all([
+      this.fs.getDocs(this.fs.collection(this.db, 'profiles')),
+      this.fs.getDocs(this.fs.collection(this.db, 'adminNotes')).catch(() => null),
+    ]);
+    const memo = new Map((notes?.docs || []).map((d) => [d.id, d.data().memo || '']));
+    return snap.docs.map((d) => ({ uid: d.id, ...d.data(), ...(memo.has(d.id) ? { memo: memo.get(d.id) } : {}) }));
+  }
+  // 관리자 메모는 대상 사용자가 볼 수 없는 adminNotes 에 저장 (예전 프로필 memo 필드는 제거)
+  async setMemo(uid, memo, by) {
+    await this.fs.setDoc(this.fs.doc(this.db, 'adminNotes', uid), { memo, by, updatedAt: new Date().toISOString() });
+    await this.fs.updateDoc(this.fs.doc(this.db, 'profiles', uid), { memo: this.fs.deleteField() }).catch(() => {});
   }
   updateProfile(uid, patch) { return this.fs.setDoc(this.fs.doc(this.db, 'profiles', uid), patch, { merge: true }); }
   async userStats(uid) {
@@ -212,8 +227,12 @@ class FirebaseBackend {
     out.settings = s.exists() ? s.data() : null;
     return out;
   }
-  async put(col, id, data) { await this.fs.setDoc(this._doc(col, id), clean(data)); }
-  async remove(col, id) { await this.fs.deleteDoc(this._doc(col, id)); }
+  // 관리자 열람 모드에서는 쓰기 금지 — 열람 중인 사용자 데이터를 실수로 바꾸지 않도록
+  _writable() {
+    if (this.viewUid) throw new Error('읽기 전용 열람 모드에서는 저장할 수 없습니다');
+  }
+  async put(col, id, data) { this._writable(); await this.fs.setDoc(this._doc(col, id), clean(data)); }
+  async remove(col, id) { this._writable(); await this.fs.deleteDoc(this._doc(col, id)); }
   // 배치는 최대 500건이므로 나눠서 커밋
   async _batch(ops) {
     for (let i = 0; i < ops.length; i += 400) {
@@ -222,16 +241,17 @@ class FirebaseBackend {
       await b.commit();
     }
   }
-  async removeMany(col, ids) { await this._batch(ids.map((id) => (b) => b.delete(this._doc(col, id)))); }
-  async putMany(col, rows) { await this._batch(rows.map((r) => (b) => b.set(this._doc(col, r.id), clean(r)))); }
+  async removeMany(col, ids) { this._writable(); await this._batch(ids.map((id) => (b) => b.delete(this._doc(col, id)))); }
+  async putMany(col, rows) { this._writable(); await this._batch(rows.map((r) => (b) => b.set(this._doc(col, r.id), clean(r)))); }
   async replace(col, rows) {
+    this._writable();
     const snap = await this.fs.getDocs(this._col(col));
     const keep = new Set(rows.map((r) => r.id));
     const ops = snap.docs.filter((d) => !keep.has(d.id)).map((d) => (b) => b.delete(d.ref));
     ops.push(...rows.map((r) => (b) => b.set(this._doc(col, r.id), clean(r))));
     await this._batch(ops);
   }
-  async saveSettings(s) { await this.fs.setDoc(this._doc('meta', 'settings'), clean(s)); }
+  async saveSettings(s) { this._writable(); await this.fs.setDoc(this._doc('meta', 'settings'), clean(s)); }
 }
 
 export async function createBackend() {

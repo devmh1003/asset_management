@@ -71,6 +71,15 @@ python dev/serve.py 8765
 
 - `public/js/firebase-config.js` 의 `apiKey` 가 비어 있으면 **로컬 모드**(브라우저 localStorage 저장)로 동작합니다.
 - URL 에 `?local=1` 을 붙이면 Firebase 설정이 있어도 로컬 모드로 열립니다 (로그인 없이 테스트).
+- `npx firebase-tools emulators:start --only auth,firestore` 로 에뮬레이터(Auth 9199, Firestore 8089, Java 11+ 필요)를 띄우고 `http://localhost:8765/?emu=1` 로 열면 실제 규칙으로 여러 계정을 시험할 수 있습니다 (localhost 에서만 동작).
+
+### 보안 규칙 테스트
+
+`dev/rules-test` 에 비로그인·타인 데이터 접근·관리자 사칭·승인 우회·이력 위조 등 100여 개 시나리오가 있습니다. 규칙을 바꾸면 게시 전에 실행하세요.
+
+```bash
+cd dev/rules-test && npm install && npm test
+```
 
 ## Firebase 설정 (무료 Spark 플랜)
 
@@ -86,8 +95,15 @@ python dev/serve.py 8765
 - 웹 `apiKey` 는 공개 식별자입니다. 접근 제어는 `firestore.rules` 와 승인된 도메인이 담당합니다.
 - 각 사용자는 `users/{자기 uid}` 아래만 읽고 씁니다.
 - 관리자: `firestore.rules` 의 부트스트랩 이메일 목록 또는 `admins/{email}` 문서. 관리자는 모든 사용자 데이터 열람·정리, `profiles` 의 `disabled` 설정, 추천 분류 템플릿(`meta/taxonomyTemplate`) 편집 가능.
-- 비활성화(`disabled`)·승인 대기(`pending`) 계정은 로그인은 되지만 Firestore 쓰기가 거부됩니다. 사용자는 자신의 `disabled`·`pending`·`memo`·`approvedAt`·`approvedBy` 를 바꿀 수 없고, 승인제가 켜진 동안 새 프로필은 `pending: true` 로만 만들 수 있습니다.
-- `auditLogs` 는 본인 uid·이메일과 서버 시각(`request.time`)으로만 추가할 수 있고 수정은 불가, 삭제는 관리자만 가능합니다.
+- 관리자 판별은 규칙·앱 모두 **이메일 인증된** 계정만 인정합니다.
+- 비활성화(`disabled`)·승인 대기(`pending`) 계정은 로그인은 되지만 Firestore 쓰기가 거부됩니다 (앱에서도 읽기 전용). 사용자는 자신의 `disabled`·`pending`·`approvedAt`·`approvedBy` 를 바꿀 수 없고, 승인제가 켜진 동안 새 프로필은 `pending: true` 로만 만들 수 있습니다.
+- 프로필은 정해진 필드만 저장할 수 있고, `emailVerified` 는 실제로 인증된 토큰일 때만 `true` 로 기록됩니다. 관리자 화면에 "이메일 미인증" 이 표시되며 승인 시 경고합니다 (다른 사람 이메일 사칭 방지).
+- 관리자 메모는 대상 사용자가 읽을 수 없는 `adminNotes/{uid}` 에 저장합니다.
+- `users/{uid}` 아래에는 앱이 쓰는 컬렉션(`meta` 는 `settings` 문서만)에만 쓸 수 있습니다.
+- 관리자 열람 모드는 앱과 저장소 계층 모두에서 쓰기를 막고, AI 기능(외부 전송)도 막습니다. 열람·승인·메모 등 관리자 작업은 열람 중에도 이력에 남습니다.
+- `auditLogs` 는 본인 uid·이메일과 서버 시각(`request.time`)으로만 추가할 수 있고 수정은 불가, 삭제는 기본 관리자(소유자)만 가능합니다.
+- 로그아웃하면 페이지를 새로 불러와 이전 사용자의 데이터가 메모리에 남지 않습니다. OpenAI 키와 AI 대화는 브라우저에 **계정별로** 따로 저장됩니다.
+- `index.html` 의 Content-Security-Policy 로 스크립트는 자기 사이트·고정 버전 CDN·Firebase·Google 로그인에서만 실행되며, SheetJS·Chart.js·폰트 CSS 는 SRI 해시로 변조를 검사합니다.
 - `meta/appConfig`(공지·가입 정책)·`meta/taxonomyTemplate` 은 로그인 사용자 읽기, 관리자만 쓰기입니다.
 - 사용자는 설정에서 비밀번호 재설정 메일·회원 탈퇴(데이터·프로필·인증 계정 삭제, 최근 로그인 필요)를 직접 할 수 있습니다. 다른 사용자의 인증 계정 삭제는 Firebase 콘솔에서만 가능합니다 (무료 플랜에는 서버 코드가 없음).
 
@@ -119,7 +135,8 @@ users/{uid}/kpis/{id}         연도, KPI명, 지표, 방향, 목표, q[4](수�
 users/{uid}/scenarios/{id}    시뮬레이션 저장본
 users/{uid}/goals/{id}        항목, 목표, 지표, 현 상황, 전략, 진행
 users/{uid}/meta/settings     환율(fx, fxUpdatedAt, fxAuto), 분류체계(taxonomy), 출생연도(birthYear)
-profiles/{uid}                이메일, 이름, 가입/최근 로그인, 로그인 횟수, disabled, pending, 승인자, 관리자 메모
+profiles/{uid}                이메일, 이메일 인증 여부, 이름, 가입/최근 로그인, 로그인 횟수, disabled, pending, 승인자
+adminNotes/{uid}              관리자 메모 (관리자만 읽기·쓰기)
 admins/{email}                추가 관리자
 auditLogs/{id}                변경 이력: uid, email, action, target, detail, at(서버 시각), subject(관리자 작업 대상 uid). ID 가 시간 역순이라 최신순 조회
 meta/taxonomyTemplate         관리자가 편집한 추천 분류 템플릿

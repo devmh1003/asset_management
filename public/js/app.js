@@ -2,7 +2,7 @@ import { createBackend, isFirebaseConfigured, COLLECTIONS } from './store.js';
 import * as M from './model.js';
 import { exportWorkbook, parseWorkbook, parseStatement, exportTransactions } from './excel.js';
 import { fetchRates, isStale } from './fx.js';
-import { AI_MODELS, DEFAULT_AI, loadAiConfig, saveAiConfig, aiReady, maskKey, loadChat, saveChat, chatStream, chatJson, testConnection, SYSTEM_PROMPT, QUICK_PROMPTS } from './ai.js';
+import { AI_MODELS, DEFAULT_AI, loadAiConfig, saveAiConfig, aiReady, maskKey, loadChat, saveChat, setAiUser, chatStream, chatJson, testConnection, SYSTEM_PROMPT, QUICK_PROMPTS } from './ai.js';
 
 const S = {
   be: null,
@@ -140,7 +140,7 @@ const rowLabel = (r) => r?.name || r?.creditor || r?.item || r?.title || r?.desc
 S.snap = new Map();
 
 function audit(action, target, detail = '', extra = {}) {
-  if (S.readOnly || !S.be?.log) return;
+  if ((S.readOnly && action !== 'admin') || !S.be?.log) return;
   S.be.log({ action, target, detail, ...extra }).catch((e) => console.warn('이력 기록 실패', e.message || e));
 }
 function snapRows(coll, rows) { for (const r of rows) S.snap.set(`${coll}:${r.id}`, JSON.stringify(r)); }
@@ -211,10 +211,13 @@ function instrumentBackend(be) {
 }
 
 // ---------- 데이터 조작 ----------
+// 저장이 막힌 이유 (관리자 열람 / 비활성 계정)
+const readOnlyMsg = () => (S.viewing ? '읽기 전용 열람 모드입니다' : '비활성화된 계정이라 저장할 수 없습니다. 관리자에게 문의하세요');
+const errMsg = (e) => (e?.code === 'permission-denied' ? '권한이 없어 저장하지 못했습니다 (계정 상태를 확인하세요)' : e?.message || String(e));
 async function guard(fn, okMsg) {
-  if (S.readOnly) { toast('읽기 전용 열람 모드입니다', 'err'); return false; }
+  if (S.readOnly) { toast(readOnlyMsg(), 'err'); return false; }
   try { await fn(); if (okMsg) toast(okMsg); return true; }
-  catch (e) { console.error(e); toast(`저장 실패: ${e.message || e}`, 'err'); return false; }
+  catch (e) { console.error(e); toast(`저장 실패: ${errMsg(e)}`, 'err'); return false; }
 }
 
 // 행 순서 이동 / 복제 (order 값 교환)
@@ -270,7 +273,9 @@ const snapSettings = () => S.snap.set('settings:settings', JSON.stringify({ ...S
 async function reload() {
   const all = await S.be.loadAll();
   for (const c of COLLECTIONS) S.data[c] = all[c] || [];
-  if (all.settings) S.settings = { ...structuredClone(M.DEFAULT_SETTINGS), ...all.settings };
+  S.settings = { ...structuredClone(M.DEFAULT_SETTINGS), ...(all.settings || {}) };
+  // 설정 문서가 아직 없는 첫 진입 (승인 대기 후 처음 들어온 계정 포함) → 온보딩 대상
+  S.firstRun = !all.settings && !S.readOnly;
   // 추천 분류 템플릿(관리자 편집본 또는 기본값)을 기존 설정에 비파괴적으로 병합
   try { S.taxTemplate = (await S.be.getTaxonomyTemplate()) || null; } catch { S.taxTemplate = null; }
   const merged = M.mergeTaxonomy(S.settings.taxonomy, S.taxTemplate || M.DEFAULT_TAXONOMY);
@@ -336,6 +341,7 @@ async function seed(colls) {
 // ---------- 환율 ----------
 async function refreshFx({ silent = false } = {}) {
   if (S.fxBusy) return;
+  if (S.readOnly) { if (!silent) toast(readOnlyMsg(), 'err'); return; }
   S.fxBusy = true;
   try {
     const codes = Object.keys(S.settings.fx);
@@ -370,6 +376,8 @@ function cellEditor(c, row, coll) {
   const fid = `${row.id}:${c.key}`;
   const raw = c.get ? c.get(row) : row[c.key];
   const commit = (val) => {
+    // 열람 모드: 화면 값만 바뀌고 저장은 안 되는 혼란을 막기 위해 원래 값으로 되돌림
+    if (S.readOnly) { toast(readOnlyMsg(), 'err'); return setTimeout(render, 0); }
     let v = val;
     if (c.type === 'num' && c.amount) {
       // "1.2억", "500만", "$1,000" 등 자연어 금액 파싱 + 통화 힌트
@@ -806,7 +814,7 @@ function ensureMid(major, mid) {
 // OpenAI 로 미분류(기본값) 항목 분류 — 분류체계에 있는 값만 적용
 async function aiClassify() {
   const ai = aiState();
-  if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); return go('settings'); }
+  if (!aiGate(ai)) return;
   const tax = S.settings.taxonomy;
   const candidates = basisAssets().filter((r) => r.name && (!r.major || !r.mid || (r.major === tax[0]?.major && r.mid === tax[0]?.mids[0])));
   if (!candidates.length) return toast('분류할 항목이 없습니다 — 이미 모두 분류되어 있습니다');
@@ -1851,7 +1859,7 @@ async function autoClassifyTx() {
 
 async function aiClassifyTx() {
   const ai = aiState();
-  if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); return go('settings'); }
+  if (!aiGate(ai)) return;
   const rows = S.data.transactions.filter((r) => String(r.date).startsWith(S.txMonth) && r.desc && (!r.category || r.category === '기타')).slice(0, 150);
   if (!rows.length) return toast('AI 로 분류할 미분류 거래가 없습니다');
   toast(`${rows.length}건을 AI 로 분류하는 중…`);
@@ -1969,6 +1977,12 @@ function pageStrategy() {
 }
 
 // ---------- AI 어드바이저 (OpenAI) ----------
+// AI 사용 가능 여부 확인 (열람 모드에서는 다른 사용자 데이터를 외부로 보내지 않도록 차단)
+function aiGate(ai) {
+  if (S.viewing) { toast('열람 모드에서는 AI 기능을 사용할 수 없습니다', 'err'); return false; }
+  if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); go('settings'); return false; }
+  return true;
+}
 function aiState() {
   if (!S.ai) S.ai = { cfg: loadAiConfig(), messages: loadChat(), busy: false, abort: null, showCtx: false, draft: '', liveEl: null };
   return S.ai;
@@ -2051,7 +2065,7 @@ async function aiSend(text) {
   const ai = aiState();
   text = String(text || '').trim();
   if (!text) return;
-  if (!aiReady(ai.cfg)) { toast('설정에서 OpenAI API 키를 먼저 등록하세요', 'err'); return go('settings'); }
+  if (!aiGate(ai)) return;
   if (ai.busy) return toast('답변을 생성하는 중입니다', 'err');
   ai.messages.push({ role: 'user', content: text, at: Date.now() });
   const reply = { role: 'assistant', content: '', at: Date.now(), model: ai.cfg.model };
@@ -2152,6 +2166,7 @@ function exportLogs(rows, prefix) {
 const STATUS = { active: ['활성', 'ok'], pending: ['승인 대기', 'warn'], disabled: ['비활성', 'bad'] };
 const userStatus = (p) => (p.disabled ? 'disabled' : p.pending ? 'pending' : 'active');
 const providerName = (p) => ({ 'google.com': 'Google', password: '이메일' }[p] || p || '—');
+const isOwner = () => !!S.user?.emailVerified && BOOTSTRAP_ADMINS.includes((S.user.email || '').toLowerCase());
 const adminEmailSet = () => new Set([...BOOTSTRAP_ADMINS, ...(S.admins || []).map((a) => a.email)]);
 
 async function loadAdminData() {
@@ -2177,6 +2192,8 @@ async function adminDo(p, label, fn) {
 }
 
 async function approveUser(p) {
+  if (p.provider === 'password' && !p.emailVerified
+    && !(await confirmBox('이메일 미인증 계정', `${p.email} 은(는) 이메일 인증을 하지 않았습니다. 다른 사람이 이 주소를 사칭했을 수 있습니다. 그래도 승인할까요?`, '승인'))) return;
   await adminDo(p, '가입 승인', async () => { const patch = { pending: false, approvedAt: new Date().toISOString(), approvedBy: S.user.email }; await S.be.updateProfile(p.uid, patch); Object.assign(p, patch); toast(`${p.email} 을(를) 승인했습니다`); });
 }
 async function rejectUser(p) {
@@ -2268,7 +2285,8 @@ function adminUsers() {
         h('div', {}, h('b', {}, p.name || '(이름 없음)'), ' ', h('span', { class: 'muted' }, p.email),
           isMe ? h('span', { class: 'chip-s ok', style: { marginLeft: '6px' } }, '나') : null,
           isAdm ? h('span', { class: 'chip-s warn', style: { marginLeft: '6px' } }, '관리자') : null,
-          h('span', { class: `chip-s ${STATUS[st][1]}`, style: { marginLeft: '6px' } }, STATUS[st][0])),
+          h('span', { class: `chip-s ${STATUS[st][1]}`, style: { marginLeft: '6px' } }, STATUS[st][0]),
+          p.provider === 'password' && !p.emailVerified ? h('span', { class: 'chip-s warn', style: { marginLeft: '6px' }, title: '이메일 소유가 확인되지 않은 계정입니다' }, '이메일 미인증') : null),
         h('div', { class: 'meta' }, `가입 ${fmtDT(p.createdAt)} · 최근 로그인 ${fmtDT(p.lastLogin)} · ${providerName(p.provider)} · 로그인 ${p.loginCount || 1}회`,
           p.approvedBy ? ` · 승인 ${p.approvedBy}` : null,
           p.stats ? ` · 자산 ${p.stats.assets} · 부동산 ${p.stats.realestate} · 부채 ${p.stats.liabilities} · 현금흐름 ${p.stats.cashflow} · 소비 ${p.stats.transactions} · KPI ${p.stats.kpis}` : null,
@@ -2280,7 +2298,7 @@ function adminUsers() {
         btn('이력', () => { S.logFilter = { ...S.logFilter, uid: p.uid }; S.adminLogs = null; S.adminTab = 'logs'; render(); }, 'small'),
         btn('데이터 열람', () => viewAs(p), 'small', { disabled: isMe }),
         btn('백업', () => backupUser(p), 'small', { title: '이 사용자의 전체 데이터를 JSON 으로 내려받기' }),
-        btn('메모', async () => { const v = await ask('관리자 메모', [{ key: 'm', label: p.email, value: p.memo || '' }], '저장'); if (v) await adminDo(p, `메모: ${v.m}`, async () => { await S.be.updateProfile(p.uid, { memo: v.m }); p.memo = v.m; }); }, 'small'),
+        btn('메모', async () => { const v = await ask('관리자 메모', [{ key: 'm', label: p.email, value: p.memo || '' }], '저장'); if (v) await adminDo(p, `메모: ${v.m}`, async () => { await S.be.setMemo(p.uid, v.m, S.user.email); p.memo = v.m; }); }, 'small'),
         st !== 'pending' ? btn(p.disabled ? '활성화' : '비활성화', async () => {
           if (isMe) return toast('본인 계정은 비활성화할 수 없습니다', 'err');
           if (!p.disabled && !(await confirmBox('계정 비활성화', `${p.email} 의 데이터 쓰기를 막을까요? (로그인은 가능하지만 저장이 거부됩니다)`, '비활성화'))) return;
@@ -2340,7 +2358,7 @@ function adminLogsTab() {
         btn('엑셀 다운로드', () => { exportLogs(rows, '변경이력'); audit('export', '변경 이력 엑셀', `${rows.length}건`); }, 'small', { disabled: !rows.length }))),
       S.logError ? h('p', { class: 'down' }, `이력을 불러오지 못했습니다: ${S.logError} — Firestore 규칙이 최신인지 확인하세요.`) : logTable(rows, { limit: 500 })),
     card(cardHead('이력 정리', 'Firestore 무료 한도(저장 1GB)를 아끼려면 오래된 이력을 주기적으로 정리하세요. 정리 작업도 이력에 남습니다.'),
-      h('div', { class: 'row' }, btn('오래된 이력 삭제…', async () => {
+      !isOwner() ? h('p', { class: 'muted small' }, '이력 삭제는 기본 관리자만 할 수 있습니다 (감사 기록 보호).') : h('div', { class: 'row' }, btn('오래된 이력 삭제…', async () => {
         const v = await ask('오래된 이력 삭제', [{ key: 'd', label: '며칠 이전 기록을 삭제할까요?', type: 'number', value: 180 }], '다음');
         const days = Math.round(M.num(v?.d));
         if (!days || days < 7) return v && toast('7일 이상으로 입력하세요', 'err');
@@ -2425,7 +2443,7 @@ function showPending(profile) {
       } catch (e) { toast(e.message, 'err'); }
     }, 'primary block'),
     btn('개인정보 처리 안내', showPrivacy, 'block'),
-    btn('로그아웃', () => S.be.signOut(), 'block')));
+    btn('로그아웃', signOutAll, 'block')));
 }
 
 async function onboarding() {
@@ -2550,8 +2568,10 @@ function viewAs(p) {
   reload().then(() => { toast(`${p.email} 데이터를 읽기 전용으로 열람합니다`); go('dashboard'); buildShell(); }).catch((e) => { toast(`열람 실패: ${e.message}`, 'err'); exitView(); });
 }
 function exitView() {
-  S.viewing = null; S.readOnly = false; S.be.viewAs(null);
-  reload().then(() => { buildShell(); go('admin'); });
+  S.be.viewAs(null);
+  for (const c of COLLECTIONS) S.data[c] = [];
+  reload().then(() => { S.viewing = null; S.readOnly = false; buildShell(); go('admin'); })
+    .catch((e) => { toast(`불러오기 실패: ${e.message}`, 'err'); location.reload(); });
 }
 
 // ---------- 추가 기능: 테마 / JSON 백업 / 인쇄 ----------
@@ -2708,7 +2728,7 @@ function buildShell() {
   $('#btn-up').onclick = pickUpload;
   $('#btn-theme').onclick = toggleTheme;
   $('#user').replaceChildren(S.user
-    ? h('span', { class: 'user' }, h('span', { class: 'muted email', title: S.user.email || '' }, S.profile?.name || S.user.displayName || S.user.email || ''), btn('로그아웃', () => { flushLogs(); S.be.signOut(); }, 'small'))
+    ? h('span', { class: 'user' }, h('span', { class: 'muted email', title: S.user.email || '' }, S.profile?.name || S.user.displayName || S.user.email || ''), btn('로그아웃', signOutAll, 'small'))
     : '');
 }
 
@@ -2786,7 +2806,14 @@ async function enterApp() {
   buildShell();
   render();
   if (S.settings.fxAuto !== false && isStale(S.settings.fxUpdatedAt)) refreshFx({ silent: true });
-  if (S.profile?.isNew && COLLECTIONS.every((c) => !S.data[c].length)) setTimeout(onboarding, 300);
+  if ((S.profile?.isNew || S.firstRun) && COLLECTIONS.every((c) => !S.data[c].length)) setTimeout(onboarding, 300);
+}
+
+async function signOutAll() {
+  flushLogs();
+  // 같은 탭에서 다시 로그인해도 로그인 이력이 남도록
+  try { sessionStorage.removeItem(`asset-login-${S.user?.uid}`); } catch {}
+  try { await S.be.signOut(); } finally { location.reload(); }
 }
 
 async function start() {
@@ -2804,11 +2831,18 @@ async function start() {
       S.user = user;
       $('#boot').hidden = true;
       if (!user) {
+        // 다른 탭에서 로그아웃 등: 이전 사용자의 데이터가 메모리에 남지 않도록 새로 시작
+        if (S.signedIn) return location.reload();
         Object.assign(S, { admin: false, viewing: null, readOnly: false, profile: null, appConfig: null, myLogs: null, adminLogs: null, profiles: null, admins: null });
         return showLogin();
       }
+      if (S.signedIn && S.signedIn !== user.uid) return location.reload();
+      S.signedIn = user.uid;
+      setAiUser(user.uid);
+      S.ai = null;
       const email = (user.email || '').toLowerCase();
-      S.admin = (BOOTSTRAP_ADMINS.includes(email) && user.emailVerified) || (await S.be.isAdmin(email));
+      // 규칙과 동일하게 이메일 인증된 계정만 관리자
+      S.admin = !!user.emailVerified && (BOOTSTRAP_ADMINS.includes(email) || (await S.be.isAdmin(email)));
       try { S.profile = await S.be.touchProfile(user, { admin: S.admin }); } catch (e) { console.warn('프로필 갱신 실패', e); S.profile = null; }
       try { S.appConfig = await S.be.getAppConfig(); } catch { S.appConfig = {}; }
       // 세션당 한 번 로그인 이력
@@ -2816,7 +2850,8 @@ async function start() {
       try { const k = `asset-login-${user.uid}`; if (!sessionStorage.getItem(k)) { sessionStorage.setItem(k, '1'); first = true; } } catch { first = true; }
       if (first) audit(S.profile?.isNew ? 'signup' : 'login', providerName(S.profile?.provider || user.providerData?.[0]?.providerId), navigator.userAgent.replace(/\s+/g, ' ').slice(0, 160));
       if (S.profile?.pending && !S.admin) return showPending(S.profile);
-      if (S.profile?.disabled) toast('이 계정은 관리자에 의해 비활성화되어 저장이 제한됩니다', 'err');
+      // 비활성 계정은 읽기 전용 (규칙에서도 쓰기 거부)
+      S.readOnly = !!S.profile?.disabled && !S.admin;
       enterApp();
     });
   } else {

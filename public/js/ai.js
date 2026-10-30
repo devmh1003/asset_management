@@ -4,21 +4,36 @@
 
 const CFG_KEY = 'asset-manager-ai';
 const CHAT_KEY = 'asset-manager-ai-chat';
+// 같은 브라우저를 여러 계정이 쓰는 경우를 위해 키·대화는 로그인 계정별로 분리 저장
+let scope = '';
+const cfgKey = () => (scope ? `${CFG_KEY}:${scope}` : CFG_KEY);
+const chatKey = () => (scope ? `${CHAT_KEY}:${scope}` : CHAT_KEY);
+export function setAiUser(uid) {
+  scope = uid || '';
+  if (!scope) return;
+  // 계정별 저장 이전에 등록한 키·대화는 처음 로그인한 계정으로 옮김
+  try {
+    for (const [oldKey, newKey] of [[CFG_KEY, cfgKey()], [CHAT_KEY, chatKey()]]) {
+      const v = localStorage.getItem(oldKey);
+      if (v != null) { if (localStorage.getItem(newKey) == null) localStorage.setItem(newKey, v); localStorage.removeItem(oldKey); }
+    }
+  } catch {}
+}
 
 export const AI_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'gpt-5-mini', 'gpt-5', 'o4-mini'];
 export const DEFAULT_AI = { key: '', model: 'gpt-4o-mini', endpoint: 'https://api.openai.com/v1' };
 
 export function loadAiConfig() {
-  try { return { ...DEFAULT_AI, ...(JSON.parse(localStorage.getItem(CFG_KEY) || '{}')) }; } catch { return { ...DEFAULT_AI }; }
+  try { return { ...DEFAULT_AI, ...(JSON.parse(localStorage.getItem(cfgKey()) || '{}')) }; } catch { return { ...DEFAULT_AI }; }
 }
 export function saveAiConfig(cfg) {
-  try { localStorage.setItem(CFG_KEY, JSON.stringify({ key: cfg.key || '', model: cfg.model || DEFAULT_AI.model, endpoint: (cfg.endpoint || DEFAULT_AI.endpoint).replace(/\/+$/, '') })); } catch {}
+  try { localStorage.setItem(cfgKey(), JSON.stringify({ key: cfg.key || '', model: cfg.model || DEFAULT_AI.model, endpoint: (cfg.endpoint || DEFAULT_AI.endpoint).replace(/\/+$/, '') })); } catch {}
 }
 export const aiReady = (cfg = loadAiConfig()) => !!(cfg.key || (cfg.endpoint && cfg.endpoint !== DEFAULT_AI.endpoint));
 export const maskKey = (k) => (k ? `${k.slice(0, 7)}…${k.slice(-4)}` : '');
 
-export function loadChat() { try { return JSON.parse(localStorage.getItem(CHAT_KEY) || '[]'); } catch { return []; } }
-export function saveChat(msgs) { try { localStorage.setItem(CHAT_KEY, JSON.stringify(msgs.slice(-40))); } catch {} }
+export function loadChat() { try { return JSON.parse(localStorage.getItem(chatKey()) || '[]'); } catch { return []; } }
+export function saveChat(msgs) { try { localStorage.setItem(chatKey(), JSON.stringify(msgs.slice(-40))); } catch {} }
 
 function headers(cfg) {
   const h = { 'Content-Type': 'application/json' };
