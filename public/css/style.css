@@ -451,3 +451,9 @@ table.grid tfoot tr.stat-row td { font-weight: 600; color: var(--muted); }
 table.grid tfoot tr.stat-row:first-of-type td, table.grid tfoot tr.sel-stat:first-of-type td { border-top: 1px solid var(--line); }
 table.grid tfoot tr.sel-stat td, table.grid tfoot tr.sel-stat td.sel + td { background: color-mix(in srgb, var(--accent) 10%, var(--panel-2)); color: var(--accent-2); }
 .sel-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; border-radius: 10px; background: var(--accent-soft); color: var(--accent-2); }
+
+/* AI 모델 선택 */
+.model-picker { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.model-picker .inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
+.model-select { max-width: 340px; }
+@media (max-width: 760px) { .model-select { max-width: 100%; } .model-picker { width: 100%; } }

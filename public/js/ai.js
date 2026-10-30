@@ -4,10 +4,12 @@
 
 const CFG_KEY = 'asset-manager-ai';
 const CHAT_KEY = 'asset-manager-ai-chat';
+const MODELS_KEY = 'asset-manager-ai-models';
 // 같은 브라우저를 여러 계정이 쓰는 경우를 위해 키·대화는 로그인 계정별로 분리 저장
 let scope = '';
 const cfgKey = () => (scope ? `${CFG_KEY}:${scope}` : CFG_KEY);
 const chatKey = () => (scope ? `${CHAT_KEY}:${scope}` : CHAT_KEY);
+const modelsKey = () => (scope ? `${MODELS_KEY}:${scope}` : MODELS_KEY);
 export function setAiUser(uid) {
   scope = uid || '';
   if (!scope) return;
@@ -20,7 +22,36 @@ export function setAiUser(uid) {
   } catch {}
 }
 
-export const AI_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1', 'gpt-5-mini', 'gpt-5', 'o4-mini'];
+// 추천 모델 (선택 화면 상단). 실제로 쓸 수 있는 모델은 내 키로 OpenAI 에서 목록을 받아와 함께 보여준다
+export const MODEL_INFO = [
+  { id: 'gpt-4o-mini', label: 'GPT-4o mini', note: '빠르고 가장 저렴 · 일상 질문' },
+  { id: 'gpt-4.1-mini', label: 'GPT-4.1 mini', note: '저렴 · 긴 데이터 분석에 유리' },
+  { id: 'gpt-4.1', label: 'GPT-4.1', note: '정확도 높음 · 비용 중간' },
+  { id: 'gpt-4o', label: 'GPT-4o', note: '균형형 · 비용 중간' },
+  { id: 'gpt-5-mini', label: 'GPT-5 mini', note: '추론형 · 계산·전략 질문에 강함' },
+  { id: 'gpt-5', label: 'GPT-5', note: '가장 깊은 분석 · 느리고 비쌈' },
+  { id: 'o4-mini', label: 'o4-mini', note: '추론형 · 수치 계산' },
+];
+export const AI_MODELS = MODEL_INFO.map((m) => m.id);
+export const modelNote = (id) => MODEL_INFO.find((m) => m.id === id)?.note || '';
+// 채팅에 쓸 수 없는 모델(음성·이미지·임베딩 등)은 목록에서 제외
+const CHAT_MODEL = /^(gpt-|o\d|chatgpt-)/;
+const NON_CHAT = /(audio|realtime|tts|transcribe|whisper|embedding|image|dall-e|moderation|search|instruct|computer-use|codex|deep-research)/;
+export const isChatModel = (id) => CHAT_MODEL.test(id) && !NON_CHAT.test(id);
+
+// 내 키로 사용할 수 있는 모델 목록 (계정별로 이 브라우저에 보관)
+export function loadModelList() { try { return JSON.parse(localStorage.getItem(modelsKey()) || 'null'); } catch { return null; } }
+export async function fetchModelList(cfg = loadAiConfig()) {
+  let res;
+  try { res = await fetch(`${cfg.endpoint}/models`, { headers: headers(cfg) }); }
+  catch { throw new Error('모델 목록을 불러오지 못했습니다 — API 키 또는 네트워크를 확인하세요'); }
+  if (!res.ok) throw await errorOf(res);
+  const j = await res.json();
+  const ids = [...new Set((j.data || []).map((m) => m.id).filter(isChatModel))].sort();
+  const list = { ids, fetchedAt: new Date().toISOString() };
+  try { localStorage.setItem(modelsKey(), JSON.stringify(list)); } catch {}
+  return list;
+}
 export const DEFAULT_AI = { key: '', model: 'gpt-4o-mini', endpoint: 'https://api.openai.com/v1' };
 
 export function loadAiConfig() {
@@ -62,7 +93,18 @@ async function post(cfg, body, signal) {
 // 스트리밍 응답. onDelta(text) 로 조각을 전달하고 전체 텍스트를 반환
 export async function chatStream({ cfg = loadAiConfig(), messages, onDelta, signal }) {
   const res = await post(cfg, { model: cfg.model, messages, stream: true }, signal);
-  if (!res.ok) throw await errorOf(res);
+  if (!res.ok) {
+    const err = await errorOf(res);
+    // 일부 추론 모델은 조직 인증 전에는 스트리밍이 막혀 있음 → 한 번에 받기로 재시도
+    if (res.status === 400 && /stream/i.test(err.message)) {
+      const r2 = await post(cfg, { model: cfg.model, messages }, signal);
+      if (!r2.ok) throw await errorOf(r2);
+      const full = (await r2.json()).choices?.[0]?.message?.content || '';
+      onDelta?.(full, full);
+      return full;
+    }
+    throw err;
+  }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = '', full = '';

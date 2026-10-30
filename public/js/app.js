@@ -2,7 +2,7 @@ import { createBackend, isFirebaseConfigured, COLLECTIONS } from './store.js';
 import * as M from './model.js';
 import { exportWorkbook, parseWorkbook, parseStatement, exportTransactions } from './excel.js';
 import { fetchRates, isStale } from './fx.js';
-import { AI_MODELS, DEFAULT_AI, loadAiConfig, saveAiConfig, aiReady, maskKey, loadChat, saveChat, setAiUser, chatStream, chatJson, testConnection, SYSTEM_PROMPT, QUICK_PROMPTS } from './ai.js';
+import { AI_MODELS, MODEL_INFO, modelNote, loadModelList, fetchModelList, DEFAULT_AI, loadAiConfig, saveAiConfig, aiReady, maskKey, loadChat, saveChat, setAiUser, chatStream, chatJson, testConnection, SYSTEM_PROMPT, QUICK_PROMPTS } from './ai.js';
 
 const S = {
   be: null,
@@ -2159,7 +2159,7 @@ function aiSettingsCard() {
     render();
   };
   return card(cardHead('AI 어드바이저 (OpenAI API)', '키는 이 브라우저(localStorage)에만 저장되며 Firestore 나 다른 서버로 보내지 않습니다', status),
-    h('datalist', { id: 'dl-ai-models' }, AI_MODELS.map((m) => h('option', { value: m }))),
+    h('datalist', { id: 'dl-ai-models' }, [...new Set([...AI_MODELS, ...(loadModelList()?.ids || [])])].map((m) => h('option', { value: m }))),
     h('div', { class: 'form ai-form' },
       h('label', {}, h('span', {}, 'OpenAI API 키'), key),
       h('label', {}, h('span', {}, '모델'), model),
@@ -2238,6 +2238,60 @@ async function aiSend(text) {
   render();
 }
 
+// AI 어드바이저 모델 선택: 추천 모델 + 내 키로 쓸 수 있는 모델(OpenAI 목록) + 직접 입력
+async function refreshModels({ silent = false } = {}) {
+  const ai = aiState();
+  if (ai.modelsBusy) return;
+  ai.modelsBusy = true;
+  if (!silent) render();
+  try {
+    const list = await fetchModelList(ai.cfg);
+    ai.modelList = list;
+    if (!silent) toast(`사용 가능한 모델 ${list.ids.length}개를 불러왔습니다`);
+  } catch (e) { if (!silent) toast(e.message, 'err'); }
+  ai.modelsBusy = false;
+  render();
+}
+function setAiModel(id) {
+  const ai = aiState();
+  id = String(id || '').trim();
+  if (!id || id === ai.cfg.model) return;
+  saveAiConfig({ ...ai.cfg, model: id });
+  ai.cfg = loadAiConfig();
+  ai.form = null;
+  toast(`모델을 ${id} 로 바꿨습니다`);
+  render();
+}
+function modelPicker() {
+  const ai = aiState();
+  if (ai.modelList === undefined) {
+    ai.modelList = loadModelList();
+    // 처음 열 때 한 번 조용히 목록을 받아 둠 (실패해도 추천 목록으로 동작)
+    if (!ai.modelList && aiReady(ai.cfg) && ai.cfg.endpoint === DEFAULT_AI.endpoint) setTimeout(() => refreshModels({ silent: true }), 0);
+  }
+  const avail = ai.modelList?.ids ? new Set(ai.modelList.ids) : null;
+  const cur = ai.cfg.model;
+  const rec = MODEL_INFO.filter((m) => !avail || avail.has(m.id) || m.id === cur);
+  const recIds = new Set(rec.map((m) => m.id));
+  const others = (ai.modelList?.ids || []).filter((id) => !recIds.has(id));
+  const opt = (id, label) => h('option', { value: id }, label);
+  const sel = h('select', { class: 'model-select', 'aria-label': 'AI 모델', disabled: ai.busy,
+    onchange: async (e) => {
+      if (e.target.value !== '__custom') return setAiModel(e.target.value);
+      const v = await ask('모델 직접 입력', [{ key: 'm', label: 'OpenAI 모델 ID (예: gpt-4.1-nano)', value: cur }], '사용');
+      if (v?.m) setAiModel(v.m); else render();
+    } },
+    h('optgroup', { label: '추천' }, rec.map((m) => opt(m.id, `${m.label} — ${m.note}`))),
+    !recIds.has(cur) && !others.includes(cur) ? opt(cur, cur) : null,
+    others.length ? h('optgroup', { label: `내 계정에서 사용 가능 (${others.length})` }, others.map((id) => opt(id, id))) : null,
+    h('optgroup', { label: '기타' }, opt('__custom', '직접 입력…')));
+  sel.value = cur;
+  return h('div', { class: 'model-picker' },
+    h('label', { class: 'inline' }, h('span', {}, '모델'), sel),
+    btn(ai.modelsBusy ? '불러오는 중…' : '↻ 목록', () => refreshModels(), 'small', { disabled: ai.modelsBusy, title: '내 API 키로 사용할 수 있는 모델 목록을 OpenAI 에서 다시 받아옵니다' }),
+    modelNote(cur) ? h('span', { class: 'muted small' }, modelNote(cur)) : null);
+}
+
 function pageAdvisor() {
   const ai = aiState();
   const ready = aiReady(ai.cfg);
@@ -2268,7 +2322,7 @@ function pageAdvisor() {
   return h('div', { class: 'stack' },
     !ready ? h('div', { class: 'banner' }, 'OpenAI API 키가 없습니다. 설정 페이지에서 키를 등록하면 데이터 기반 자산운용 조언을 받을 수 있습니다.', h('span', { class: 'spacer' }), btn('설정으로 이동', () => go('settings'), 'small primary')) : null,
     toolbar(
-      h('span', { class: `chip-s ${ready ? 'ok' : ''}` }, ready ? `${ai.cfg.model}` : '미연결'),
+      ready ? modelPicker() : h('span', { class: 'chip-s' }, '미연결'),
       btn('데이터 요약 ' + (ai.showCtx ? '숨기기' : '보기'), () => { ai.showCtx = !ai.showCtx; render(); }, 'small'),
       h('span', { class: 'spacer' }),
       ai.messages.length ? btn('새 대화', async () => { if (ai.busy) ai.abort?.abort(); if (!(await confirmBox('새 대화', '현재 대화를 지우고 새로 시작할까요? (저장한 리포트는 유지)', '새로 시작'))) return; ai.messages = []; saveChat([]); render(); }, 'small') : null),
