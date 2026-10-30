@@ -2273,7 +2273,8 @@ function modelPicker() {
   const cur = ai.cfg.model;
   const rec = MODEL_INFO.filter((m) => !avail || avail.has(m.id) || m.id === cur);
   const recIds = new Set(rec.map((m) => m.id));
-  const others = (ai.modelList?.ids || []).filter((id) => !recIds.has(id));
+  // 날짜가 붙은 고정 버전(gpt-5-2025-08-07 등)은 숨기고 대표 이름만 (필요하면 직접 입력)
+  const others = (ai.modelList?.ids || []).filter((id) => !recIds.has(id) && (id === cur || !/-\d{4}(-\d{2}-\d{2})?$/.test(id)));
   const opt = (id, label) => h('option', { value: id }, label);
   const sel = h('select', { class: 'model-select', 'aria-label': 'AI 모델', disabled: ai.busy,
     onchange: async (e) => {
