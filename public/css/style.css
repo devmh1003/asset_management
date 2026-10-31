@@ -457,3 +457,6 @@ table.grid tfoot tr.sel-stat td, table.grid tfoot tr.sel-stat td.sel + td { back
 .model-picker .inline { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; }
 .model-select { max-width: 340px; }
 @media (max-width: 760px) { .model-select { max-width: 100%; } .model-picker { width: 100%; } }
+
+/* 반복 거래: 꺼진 규칙 흐리게 */
+table.grid tbody tr.muted-row td { opacity: .55; }

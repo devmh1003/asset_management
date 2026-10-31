@@ -138,6 +138,16 @@ export const SHEETS = [
     ],
   },
   {
+    name: '반복거래', col: 'recurring',
+    cols: [
+      col('ID', 'id', 'text', 14),
+      { h: '사용', k: 'active', t: 'text', w: 6, get: (r) => (r.active === false ? 'N' : 'Y'), set: (o, v) => { o.active = !/^(n|no|false|0|x|아니오|미사용)$/i.test(str(v)); } },
+      col('내용', 'desc', 'text', 20), col('구분', 'type', 'text', 7), col('카테고리', 'category', 'text', 12), col('금액', 'amount', 'num', 13),
+      col('주기', 'cycle', 'text', 7), col('시작일', 'start', 'date', 12), col('종료일', 'end', 'date', 12), col('결제수단', 'method', 'text', 12),
+      col('마지막 기록일', 'appliedThrough', 'date', 13), col('메모', 'note', 'text', 20),
+    ],
+  },
+  {
     name: '관리목표', col: 'goals',
     cols: [
       col('ID', 'id', 'text', 14), col('항목', 'item', 'text', 14), col('목표', 'target', 'text', 16),
@@ -326,6 +336,11 @@ export function parseWorkbook(buffer, fallbackBasis = today()) {
         o.valuations ||= [];
       }
       if (spec.col === 'transactions') { o.type = o.type === '수입' ? '수입' : '지출'; o.amount = Math.abs(num(o.amount)); }
+      if (spec.col === 'recurring') {
+        o.type = o.type === '수입' ? '수입' : '지출'; o.amount = Math.abs(num(o.amount));
+        if (!['매월', '매년', '매주'].includes(o.cycle)) o.cycle = '매월';
+        if (o.active === undefined) o.active = true;
+      }
       out.push(o);
     });
     result.collections[spec.col] = out;

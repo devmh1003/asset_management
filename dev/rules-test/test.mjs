@@ -182,8 +182,8 @@ await t('미인증 계정 emailVerified=false 기록', true, () => ctx.bob().doc
 await t('프로필 임의 필드 추가 차단', false, () => ctx.alice().doc('profiles/alice').set({ role: 'admin' }, { merge: true }));
 await t('프로필 이름 과대 차단', false, () => ctx.alice().doc('profiles/alice').set({ name: 'x'.repeat(101) }, { merge: true }));
 await t('meta 하위 settings 외 문서 차단', false, () => ctx.alice().doc('users/alice/meta/other').set({ x: 1 }));
-await t('본인 전체 컬렉션 쓰기 (앱 컬렉션 11종)', true, async () => {
-  for (const c of ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports', 'transactions', 'realestate']) await ctx.alice().doc(`users/alice/${c}/z`).set({ a: 1 });
+await t('본인 전체 컬렉션 쓰기 (앱 컬렉션 12종)', true, async () => {
+  for (const c of ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports', 'transactions', 'realestate', 'recurring']) await ctx.alice().doc(`users/alice/${c}/z`).set({ a: 1 });
 });
 await t('관리자: 사용자 데이터 정리 (meta/settings 포함)', true, () => ctx.admin().doc('users/bob/meta/settings').delete());
 await t('추가 관리자: 기본 관리자 admins 문서 생성은 허용(무해)', true, () => ctx.admin2().doc('admins/x@y.com').set({ by: 'second@x.com' }));

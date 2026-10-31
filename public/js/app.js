@@ -130,13 +130,14 @@ async function ask(title, fields, okText = '확인') {
 const confirmBox = (title, text, okText = '삭제') => modal({ title, body: h('p', {}, text), okText, danger: true });
 
 // ---------- 변경 이력 (감사 로그) ----------
-const COLL_LABEL = { assets: '자산', liabilities: '부채', cashflow: '현금흐름', history: '연도별추이', portfolio: '포트폴리오', goals: '관리목표', kpis: 'KPI', scenarios: '시나리오', reports: 'AI리포트', transactions: '소비내역', realestate: '부동산', settings: '설정' };
+const COLL_LABEL = { assets: '자산', liabilities: '부채', cashflow: '현금흐름', history: '연도별추이', portfolio: '포트폴리오', goals: '관리목표', kpis: 'KPI', scenarios: '시나리오', reports: 'AI리포트', transactions: '소비내역', realestate: '부동산', recurring: '반복 거래', settings: '설정' };
 const FIELD_LABEL = {
   value: '금액/시세', rate: '이익률', name: '이름', major: '대분류', mid: '중분류', currency: '통화', fee: '연보수율', manager: '운용위임사', note: '메모', basis: '기준일',
   amount: '금액', creditor: '채권자', maturity: '만기일', repay: '상환방식', budget: '월예산', m: '', q: '분기실적', target: '목표', metric: '지표', dir: '방향', year: '연도',
   type: '유형', use: '용도', address: '주소', area: '면적', share: '지분', acqDate: '취득일', acqPrice: '취득가', acqCost: '부대비용', valuedAt: '시세기준일', loanId: '담보대출', deposit: '보증금', rent: '월세', holdCost: '보유비용',
   date: '날짜', desc: '내용', category: '카테고리', method: '결제수단', netWorth: '순자산', debtRatio: '부채비율', age: '나이', rating: '평가', item: '항목', status: '현황', strategy: '전략', progress: '진행', plan: '안', title: '제목',
   fx: '환율', taxonomy: '분류체계', fxAuto: '환율 자동갱신', birthYear: '출생연도', fxUpdatedAt: null,
+  cycle: '주기', start: '시작일', end: '종료일', active: '사용', appliedThrough: null, recurId: null,
 };
 const ACTION_LABEL = { login: '로그인', signup: '가입', create: '추가', update: '수정', delete: '삭제', bulk: '일괄 작업', import: '가져오기', export: '내보내기', settings: '설정', account: '계정', admin: '관리자' };
 const ACTION_TONE = { delete: 'bad', admin: 'warn', import: 'warn', bulk: 'warn', account: 'warn', create: 'ok', signup: 'ok' };
@@ -1899,6 +1900,121 @@ function pageSettings() {
 const txMonths = () => [...new Set(S.data.transactions.map((r) => String(r.date).slice(0, 7)).filter((m) => /^\d{4}-\d{2}$/.test(m)))].sort();
 const curMonth = () => M.today().slice(0, 7);
 
+// ---------- 반복 거래 (구독·월급·관리비) ----------
+// 시작일부터 오늘까지 아직 기록하지 않은 발생분을 소비내역에 추가하고, 규칙의 마지막 기록일을 갱신
+const recurTx = (r, date, i = 0) => ({ id: M.uid() + i, order: Date.now() + i, date, type: r.type === '수입' ? '수입' : '지출', desc: r.desc || '', category: r.category || (r.type === '수입' ? '급여' : '구독'), amount: Math.abs(M.num(r.amount)), method: r.method || '', note: '반복', recurId: r.id });
+const recurPending = () => S.data.recurring.filter((r) => r.active !== false && M.num(r.amount)).reduce((n, r) => n + M.recurDates(r, M.today()).length, 0);
+async function applyRecurring({ quiet = false } = {}) {
+  if (S.readOnly || !S.data.recurring.length) return 0;
+  const today = M.today();
+  const have = new Set(S.data.transactions.filter((t) => t.recurId).map((t) => `${t.recurId}|${t.date}`));
+  const txs = [], updated = [];
+  for (const r of S.data.recurring) {
+    if (r.active === false || !M.num(r.amount)) continue; // 금액이 비어 있는 규칙은 건너뛰고 나중에 반영
+    const dates = M.recurDates(r, today);
+    if (!dates.length) continue;
+    for (const d of dates) if (!have.has(`${r.id}|${d}`)) txs.push(recurTx(r, d, txs.length));
+    updated.push({ ...r, appliedThrough: dates[dates.length - 1] });
+  }
+  if (!updated.length) { if (!quiet) toast('새로 기록할 반복 거래가 없습니다'); return 0; }
+  const ok = await guard(async () => {
+    if (txs.length) await S.be.putMany('transactions', txs);
+    await S.be.putMany('recurring', updated);
+  });
+  if (!ok) return 0;
+  S.data.transactions.push(...txs);
+  for (const u of updated) Object.assign(S.data.recurring.find((x) => x.id === u.id), u);
+  if (txs.length) {
+    const names = [...new Set(txs.map((t) => t.desc || '(내용 없음)'))];
+    audit('bulk', '반복 거래 자동 기록', `${txs.length}건 · ${names.slice(0, 6).join(', ')}${names.length > 6 ? ' 외' : ''}`);
+    toast(`반복 거래 ${txs.length}건을 소비내역에 기록했습니다 (${names.slice(0, 3).join(', ')}${names.length > 3 ? ' 등' : ''})`);
+  }
+  return txs.length;
+}
+
+// 월급(또는 정기 수입) 여러 달을 한 번에 등록. 원하면 이후 달은 반복 거래로 자동 기록
+async function salaryBulk() {
+  const y = new Date().getFullYear();
+  const v = await ask('💰 월급 일괄 등록', [
+    { key: 'desc', label: '내용', value: '월급' },
+    { key: 'amount', label: '실수령액 (예: 350만, 3,500,000)', value: '' },
+    { key: 'day', label: '지급일 (매월 며칠 · 말일은 31)', type: 'number', value: 25 },
+    { key: 'from', label: '시작 월', type: 'month', value: `${y}-01` },
+    { key: 'to', label: '끝 월', type: 'month', value: curMonth() },
+    { key: 'method', label: '입금 계좌 (선택)', value: '' },
+    { key: 'repeat', label: '끝 월 이후에도 매월 자동으로 기록 (반복 거래로 저장)', type: 'checkbox', value: true },
+  ], '미리보기');
+  if (!v) return;
+  const amount = Math.abs(M.parseAmount(v.amount).value || 0);
+  const day = Math.round(M.num(v.day));
+  if (!amount) return toast('금액을 입력하세요', 'err');
+  if (day < 1 || day > 31) return toast('지급일은 1~31 사이로 입력하세요', 'err');
+  if (!/^\d{4}-\d{2}$/.test(v.from) || !/^\d{4}-\d{2}$/.test(v.to) || v.from > v.to) return toast('시작 월과 끝 월을 확인하세요', 'err');
+  const dd = String(day).padStart(2, '0');
+  const rule = { desc: v.desc || '월급', type: '수입', category: '급여', amount, cycle: '매월', start: `${v.from}-${dd}`, end: '', method: v.method || '', active: true, note: '' };
+  // 지급일이 없는 달(31일 → 2월 등)은 말일로 맞춰짐
+  const dates = M.recurDates(rule, `${v.to}-31`, 240);
+  if (!dates.length) return toast('등록할 날짜가 없습니다', 'err');
+  // 반복 규칙의 시작일은 지급일이 그대로 있는 첫 달 (이후 달도 같은 '일' 기준으로 계산되도록)
+  rule.start = dates.find((d) => d.endsWith(`-${dd}`)) || dates[0];
+  if (dates.length > 120) return toast('한 번에 최대 120개월까지 등록할 수 있습니다', 'err');
+  const existing = new Set(S.data.transactions.map(M.txKey));
+  const rows = dates.map((d, i) => ({ ...recurTx({ ...rule, id: null }, d, i), note: '월급 일괄' })).map(({ recurId, ...t }) => t)
+    .filter((t) => !existing.has(M.txKey(t)));
+  const skipped = dates.length - rows.length;
+  const ok = await modal({ title: '월급 일괄 등록', okText: `${rows.length}건 등록`, body: h('div', { class: 'stack', style: { gap: '8px' } },
+    h('p', {}, h('b', {}, `${rule.desc} · 매월 ${day >= 31 ? '말일' : `${day}일`} · ${M.fmtKRW(amount)}원`)),
+    h('p', {}, `${dates[0]} ~ ${dates[dates.length - 1]} · ${rows.length}건 · 합계 ${M.fmtEok(amount * rows.length)}원`),
+    skipped ? h('p', { class: 'warn small' }, `같은 날짜·내용·금액의 거래가 이미 있는 ${skipped}건은 제외합니다`) : null,
+    v.repeat ? h('p', { class: 'muted small' }, `${v.to} 이후에는 매월 자동으로 기록됩니다 (소비내역 › 반복 거래에서 금액 변경·중지)`) : null) });
+  if (!ok || (!rows.length && !v.repeat)) return;
+  const recRow = v.repeat ? { ...rule, id: M.uid(), order: Date.now(), appliedThrough: dates[dates.length - 1] } : null;
+  const done = await guard(async () => {
+    if (rows.length) await S.be.putMany('transactions', rows);
+    if (recRow) await S.be.put('recurring', recRow.id, recRow);
+  });
+  if (!done) return;
+  S.data.transactions.push(...rows);
+  if (recRow) S.data.recurring.push(recRow);
+  audit('bulk', '월급 일괄 등록', `${rule.desc} ${M.fmtKRW(amount)}원 × ${rows.length}건 (${dates[0]} ~ ${dates[dates.length - 1]})${recRow ? ' · 이후 매월 자동' : ''}`);
+  toast(`${rows.length}건을 등록했습니다${recRow ? ' · 이후 매월 자동 기록' : ''}`);
+  S.txMonth = dates[dates.length - 1].slice(0, 7) <= curMonth() ? dates[dates.length - 1].slice(0, 7) : curMonth();
+  render();
+}
+
+function recurringCard(catList) {
+  const rows = S.data.recurring;
+  const today = M.today();
+  const pending = recurPending();
+  const monthly = (type) => rows.filter((r) => r.active !== false && (r.type === '수입') === (type === '수입')).reduce((s, r) => s + M.recurMonthly(r), 0);
+  const cols = [
+    { key: 'active', label: '사용', type: 'custom', render: (r) => h('input', { type: 'checkbox', checked: r.active !== false, title: '끄면 자동 기록을 멈춥니다', onchange: (e) => { r.active = e.target.checked; saveRow('recurring', r); render(); } }) },
+    { key: 'desc', label: '내용', type: 'text', w: '150px', list: 'dl-tx-desc', placeholder: '예: 넷플릭스' },
+    { key: 'type', label: '구분', type: 'select', options: () => ['지출', '수입'], w: '70px' },
+    { key: 'category', label: '카테고리', type: 'select', options: () => catList, w: '104px' },
+    { key: 'amount', label: '금액', type: 'num', w: '104px', amount: {}, placeholder: '예: 1.7만' },
+    { key: 'cycle', label: '주기', type: 'select', options: () => M.RECUR_CYCLES, w: '74px' },
+    { key: 'start', label: '시작일', type: 'date', w: '126px' },
+    { key: 'end', label: '종료일 (선택)', type: 'date', w: '126px' },
+    { key: 'method', label: '결제수단', type: 'text', w: '96px', list: 'dl-tx-method' },
+    { key: 'next', label: '다음 기록일', type: 'calc', fmt: (v) => v || '—', calc: (r) => (r.active === false ? '' : M.nextRecurDate(r, today)) },
+    { key: 'perMonth', label: '월 환산', type: 'calc', calc: (r) => (r.active === false ? 0 : M.recurMonthly(r)) },
+  ];
+  return card(cardHead('🔁 반복 거래',
+    `구독·관리비·월급처럼 반복되는 거래를 등록하면 시작일부터 오늘까지 소비내역에 자동으로 기록됩니다. 규칙을 바꾸면 앞으로 기록될 거래부터 적용됩니다.`,
+    h('div', { class: 'row' },
+      btn('+ 반복 거래', () => addRow('recurring', { active: true, desc: '', type: '지출', category: '구독', amount: 0, cycle: '매월', start: today, end: '', method: '', note: '' }, 'desc'), 'small primary'),
+      btn('💰 월급 일괄 등록', salaryBulk, 'small'))),
+    rows.length ? h('div', { class: 'chips' },
+      h('span', { class: 'chip' }, h('b', {}, '월 고정 지출'), ` ${M.fmtKRW(monthly('지출'))}원`),
+      h('span', { class: 'chip' }, h('b', {}, '월 고정 수입'), ` ${M.fmtKRW(monthly('수입'))}원`),
+      h('span', { class: 'chip' }, h('b', {}, '사용 중'), ` ${rows.filter((r) => r.active !== false).length} / ${rows.length}개`),
+      h('span', { class: 'muted small' }, '매년·매주 항목은 월 단위로 환산')) : null,
+    pending ? h('div', { class: 'banner' }, `아직 소비내역에 기록되지 않은 반복 거래가 ${pending}건 있습니다 (시작일이 지난 항목).`, h('span', { class: 'spacer' }), btn(`지금 기록 (${pending}건)`, async () => { if (await applyRecurring()) render(); }, 'small primary')) : null,
+    grid({ cols, rows: [...rows].sort((a, b) => M.num(a.order) - M.num(b.order)), coll: 'recurring', label: (r) => r.desc, stats: false, reorder: false,
+      rowClass: (r) => `${r.type === '수입' ? 'inc' : ''} ${r.active === false ? 'muted-row' : ''}` }));
+}
+
 function pageTransactions() {
   const months = txMonths();
   if (!S.txMonth || !(months.includes(S.txMonth) || S.txMonth === curMonth())) S.txMonth = months.includes(curMonth()) ? curMonth() : months[months.length - 1] || curMonth();
@@ -1938,6 +2054,8 @@ function pageTransactions() {
     toolbar(h('label', { class: 'inline' }, '월', monthSel),
       btn('+ 지출', () => addRow('transactions', { date: isCur ? M.today() : `${S.txMonth}-01`, type: '지출', desc: '', category: '기타', amount: 0, method: '', note: '' }, 'desc'), 'primary'),
       btn('+ 수입', () => addRow('transactions', { date: isCur ? M.today() : `${S.txMonth}-01`, type: '수입', desc: '', category: '급여', amount: 0, method: '', note: '' }, 'desc')),
+      btn(`🔁 반복 거래${S.data.recurring.length ? ` (${S.data.recurring.filter((r) => r.active !== false).length})` : ''}`, () => { S.showRecur = !S.showRecur; render(); }, S.showRecur ? 'primary' : '', { title: '구독·월급·관리비 등 반복 거래 자동 기록' }),
+      btn('💰 월급 일괄 등록', salaryBulk, '', { title: '여러 달의 월급을 한 번에 등록' }),
       btn('⬆ 명세 가져오기', pickStatement, '', { title: '카드사·은행 이용내역(엑셀/CSV)을 올리면 열을 자동 인식해 추가합니다' }),
       btn('⬇ 소비내역 다운로드', () => exportTransactions(S.data.transactions, stampName('소비내역'))),
       btn('현금흐름에 반영', syncTxToCashflow, '', { title: `${S.txMonth} 카테고리별 합계를 현금흐름(C.F) 지출 행에 기록` }),
@@ -1945,6 +2063,7 @@ function pageTransactions() {
       ready ? btn('🤖 AI 분류', aiClassifyTx, '', { title: '미분류 거래를 OpenAI 로 분류' }) : null,
       all.length ? btn('이 달 삭제', deleteTxMonth, 'ghost-danger') : null,
       h('span', { class: 'spacer' }), searchBox()),
+    S.showRecur || (!S.data.recurring.length ? false : recurPending() > 0) ? recurringCard(catList) : null,
     h('div', { class: 'kpis' },
       kpi(`${S.txMonth} 지출`, `${M.fmtKRW(spent)}원`, diff(spent, prevSpent || null) || `전월 ${M.fmtEok(prevSpent)}원`, 'accent'),
       kpi('일평균 · 월말 예상', `${M.fmtEok(dayN ? spent / dayN : 0)}원`, isCur ? `이 추세면 월말 ${M.fmtEok((spent / dayN) * daysInMonth)}원` : `${daysInMonth}일 기준`),
@@ -2845,7 +2964,7 @@ const PAGE_SHEETS = {
   liabilities: { label: '부채', colls: ['liabilities'] },
   realestate: { label: '부동산', colls: ['realestate'] },
   cashflow: { label: '현금흐름', colls: ['cashflow'] },
-  transactions: { label: '소비내역', colls: ['transactions'] },
+  transactions: { label: '소비내역', colls: ['transactions', 'recurring'] },
   kpi: { label: 'KPI·관리목표', colls: ['kpis', 'goals'] },
   history: { label: '연도별추이', colls: ['history'] },
   portfolio: { label: '포트폴리오', colls: ['portfolio'] },
@@ -3079,6 +3198,8 @@ async function enterApp() {
   render();
   if (S.settings.fxAuto !== false && isStale(S.settings.fxUpdatedAt)) refreshFx({ silent: true });
   if ((S.profile?.isNew || S.firstRun) && COLLECTIONS.every((c) => !S.data[c].length)) setTimeout(onboarding, 300);
+  // 반복 거래: 지난번 이후 도래한 발생분을 소비내역에 기록
+  applyRecurring({ quiet: true }).then((n) => { if (n) render(); }).catch((e) => console.warn('반복 거래 기록 실패', e));
 }
 
 async function signOutAll() {

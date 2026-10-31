@@ -44,7 +44,7 @@ service cloud.firestore {
     }
     // 사용자 데이터 컬렉션 (store.js COLLECTIONS + meta/settings)
     function userCollections() {
-      return ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports', 'transactions', 'realestate', 'meta'];
+      return ['assets', 'liabilities', 'cashflow', 'history', 'portfolio', 'goals', 'kpis', 'scenarios', 'reports', 'transactions', 'realestate', 'recurring', 'meta'];
     }
 
     match /admins/{email} {

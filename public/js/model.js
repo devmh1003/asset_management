@@ -1,7 +1,8 @@
 // 기본 설정, 엑셀 구조 기반 템플릿, 계산 로직
 
 export const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-export const today = () => new Date().toISOString().slice(0, 10);
+// 오늘 날짜 (사용자 기기 시간대 기준 — UTC 로 바꾸면 한국 오전 9시 전에는 어제가 됨)
+export const today = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 // 분류체계: 대분류(major) → 그룹(Var 현금성 / Risk 위험자산 / Fixed 고정수익·안전) → 중분류(mids)
 export const DEFAULT_TAXONOMY = [
@@ -610,6 +611,39 @@ export function txSummary(rows, year) {
 }
 // 중복 판정 키 (날짜+내용+금액)
 export const txKey = (r) => `${r.date}|${String(r.desc || '').trim()}|${Math.round(num(r.amount))}`;
+
+// ---------- 반복 거래 (구독·월급·관리비 등) ----------
+export const RECUR_CYCLES = ['매월', '매년', '매주'];
+const isYmd = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v || ''));
+const ymdOf = (y, m0, d) => `${y}-${String(m0 + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+// 시작일 기준 발생일 목록: appliedThrough(마지막 기록일) 이후 ~ until 까지 (종료일 이후 제외)
+// 매월·매년은 시작일의 '일' 을 유지하되 그 달에 없으면 말일 (31일 → 2월 28/29일)
+export function recurDates(rule, until, max = 60) {
+  if (!isYmd(rule.start)) return [];
+  const end = isYmd(rule.end) ? rule.end : null;
+  const after = isYmd(rule.appliedThrough) ? rule.appliedThrough : '';
+  const [y, m, d] = rule.start.split('-').map(Number);
+  const out = [];
+  for (let k = 0; k < 5000 && out.length < max; k++) {
+    let date;
+    if (rule.cycle === '매주') { const t = new Date(y, m - 1, d + 7 * k); date = ymdOf(t.getFullYear(), t.getMonth(), t.getDate()); }
+    else {
+      const mm = m - 1 + (rule.cycle === '매년' ? 12 : 1) * k;
+      const yy = y + Math.floor(mm / 12), mo = ((mm % 12) + 12) % 12;
+      date = ymdOf(yy, mo, Math.min(d, new Date(yy, mo + 1, 0).getDate()));
+    }
+    if (date > until || (end && date > end)) break;
+    if (date > after) out.push(date);
+  }
+  return out;
+}
+// 다음 예정일 (오늘 이후 첫 발생일)
+export function nextRecurDate(rule, from = today()) {
+  const base = isYmd(rule.appliedThrough) && rule.appliedThrough > from ? rule.appliedThrough : from;
+  return recurDates({ ...rule, appliedThrough: base }, '9999-12-31', 1)[0] || '';
+}
+// 월 환산 금액 (매년 ÷12, 매주 ×52÷12)
+export const recurMonthly = (r) => Math.abs(num(r.amount)) * (r.cycle === '매년' ? 1 / 12 : r.cycle === '매주' ? 52 / 12 : 1);
 
 // ---------- 자산 증식 전략 추천 엔진 ----------
 // 대분류별 연 변동성 가정 (몬테카를로·최적화용). 분류체계에 없는 대분류는 그룹 기본값
